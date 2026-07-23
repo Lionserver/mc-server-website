@@ -285,7 +285,10 @@ test("limits temporary administrator access to the authenticated Sites user and 
   assert.match(security, /temporary-disabled-/);
   assert.match(sessionRoute, /authMode: session\.authMode/);
   assert.match(sessionRoute, /"Cache-Control": "no-store"/);
+  assert.match(sessionRoute, /admin\.temporary_access\.started/);
   assert.match(adminPage, /임시 접근/);
+  assert.match(adminPage, /overview\.admin\.expiresAt \* 1000 - Date\.now\(\)/);
+  assert.match(adminPage, /setAuthenticated\(false\);[\s\S]*setOverview\(null\)/);
   assert.match(envExample, /ADMIN_TEMP_BYPASS_EMAIL=""/);
   assert.match(envExample, /ADMIN_TEMP_BYPASS_UNTIL=""/);
   assert.match(devVarsExample, /ADMIN_TEMP_BYPASS_EMAIL=""/);

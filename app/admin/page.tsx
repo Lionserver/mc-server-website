@@ -95,6 +95,16 @@ export default function AdminPage() {
       .catch(() => setAuthenticated(false)).finally(() => setChecking(false));
   }, [loadOverview]);
 
+  useEffect(() => {
+    if (overview?.admin.authMode !== "temporary-bypass") return;
+    const remaining = Math.max(0, overview.admin.expiresAt * 1000 - Date.now());
+    const timer = window.setTimeout(() => {
+      setAuthenticated(false);
+      setOverview(null);
+    }, remaining);
+    return () => window.clearTimeout(timer);
+  }, [overview?.admin.authMode, overview?.admin.expiresAt]);
+
   const run = async (work: () => Promise<void>, message: string) => {
     setBusy(true); setNotice("");
     try { await work(); setNotice(message); }
