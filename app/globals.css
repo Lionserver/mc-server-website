@@ -103,8 +103,7 @@ a { color:inherit; text-decoration:none; }
 .index-status b { color:var(--ink); }
 
 .directory { padding:50px 0 78px; }
-.small-directory-hero { margin-bottom:22px; border:1px solid var(--line-dark); background:var(--surface); display:grid; grid-template-columns:minmax(0,1fr) minmax(420px,620px); }
-.new-directory-hero { border-top-color:var(--accent); box-shadow:inset 0 2px 0 var(--accent); }
+.small-directory-hero { margin-bottom:22px; border:1px solid var(--line-dark); border-top-color:var(--accent); background:var(--surface); box-shadow:inset 0 2px 0 var(--accent); display:grid; grid-template-columns:minmax(0,1fr) minmax(420px,620px); }
 .small-directory-copy { min-height:168px; padding:28px 30px; border-right:1px solid var(--line); }
 .small-directory-copy > span { color:var(--accent); font-size:9px; font-weight:900; letter-spacing:.15em; }
 .small-directory-copy h2 { margin:8px 0 9px; font-size:32px; letter-spacing:-.05em; }
@@ -155,8 +154,9 @@ a { color:inherit; text-decoration:none; }
 .list-head > div { width:850px; display:grid; grid-template-columns:1fr 112px 102px 72px; text-align:center; }
 .featured-list-head { padding:0 12px; }
 .featured-list-head > div { width:auto; display:block; text-align:right; }
-.featured-directory-results { min-height:220px; display:flow-root; }
-.featured-directory-results > .empty-state { min-height:220px; }
+.featured-directory-results { min-height:156px; display:flow-root; }
+.featured-directory-results > .featured-server-group { margin-bottom:0; }
+.featured-server-group > .empty-state { min-height:122px; }
 .server-group { margin-bottom:22px; }
 .group-label { height:34px; padding:0 12px; border:1px solid var(--line); border-bottom:0; background:var(--surface-2); display:flex; align-items:center; gap:10px; }
 .group-label b { color:var(--accent); font-size:9px; letter-spacing:.11em; }
@@ -1169,7 +1169,8 @@ a { color:inherit; text-decoration:none; }
   .small-directory-hero { grid-template-columns:1fr; }
   .small-directory-copy { min-height:0; border-right:0; border-bottom:1px solid var(--line); }
   .small-directory-stats > div { min-height:76px; padding:15px; }
-  .featured-directory-results,.featured-directory-results > .empty-state { min-height:256px; }
+  .featured-directory-results { min-height:295px; }
+  .featured-server-group > .empty-state,.featured-server-group > .server-row,.featured-server-group > .small-server-row { min-height:261px; }
   .small-server-row { min-height:200px; grid-template-columns:28px 72px minmax(0,1fr) 64px; grid-template-areas:"rank mark main actions" "rank banner banner banner" "rank metrics metrics metrics"; }
   .small-server-row > .server-mark { grid-area:mark; width:72px; height:72px; }
   .small-row-rank { grid-area:rank; }
@@ -1231,7 +1232,6 @@ a { color:inherit; text-decoration:none; }
   .small-directory-stats > div { min-height:72px; padding:12px 8px; align-items:flex-start; flex-direction:column; gap:6px; }
   .small-directory-stats b { font-size:14px; }
   .small-directory-rule { align-items:flex-start; line-height:1.45; }
-  .featured-directory-results,.featured-directory-results > .empty-state { min-height:266px; }
   .small-server-row { min-height:210px; padding:8px; grid-template-columns:25px 64px minmax(0,1fr) 29px; grid-template-areas:"rank mark main actions" "rank banner banner banner" "rank metrics metrics metrics"; gap:7px; }
   .small-server-row > .server-mark { width:64px; height:64px; }
   .small-row-rank b { font-size:14px; }

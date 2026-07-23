@@ -84,7 +84,21 @@ test("ships a seven-day newly registered server directory", async () => {
   assert.match(page, /최근 7일 이내 등록된 서버가 없습니다/);
   assert.match(directory, /createdAt: row\.created_at/);
   assert.match(css, /\.main-nav \.new-directory-link/);
-  assert.match(css, /\.new-directory-hero/);
+  assert.match(page, /new-directory-hero/);
+});
+
+test("keeps featured directory result shells vertically aligned", async () => {
+  const [page, css] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /small-server-group featured-server-group/);
+  assert.match(page, /server-group new-server-group featured-server-group/);
+  assert.match(css, /\.featured-directory-results \{ min-height:156px;/);
+  assert.match(css, /\.featured-directory-results > \.featured-server-group \{ margin-bottom:0;/);
+  assert.match(css, /\.featured-server-group > \.empty-state \{ min-height:122px;/);
+  assert.match(css, /\.featured-directory-results \{ min-height:295px;/);
+  assert.match(css, /\.featured-server-group > \.empty-state,\.featured-server-group > \.server-row,\.featured-server-group > \.small-server-row \{ min-height:261px;/);
 });
 
 test("server-renders the owner console shell", async () => {
