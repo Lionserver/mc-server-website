@@ -3,8 +3,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import { ArrowLeft, KeyRound, Mail, ShieldCheck } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { safeInternalReturnTo } from "@/lib/browser-preferences.mjs";
 
 export default function OwnerLoginPage() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [step, setStep] = useState<"email" | "code">("email");
@@ -12,11 +15,11 @@ export default function OwnerLoginPage() {
   const [message, setMessage] = useState("");
   const [previewCode, setPreviewCode] = useState("");
   useEffect(() => {
-    const value = new URLSearchParams(window.location.search).get("returnTo") ?? "/operator";
+    const returnTo = safeInternalReturnTo(new URLSearchParams(window.location.search).get("returnTo"));
     fetch("/api/auth/session", { cache: "no-store" }).then((response) => {
-      if (response.ok) window.location.replace(value.startsWith("/") && !value.startsWith("//") ? value : "/operator");
+      if (response.ok) router.replace(returnTo);
     }).catch(() => undefined);
-  }, []);
+  }, [router]);
 
   async function requestCode(event: FormEvent) {
     event.preventDefault(); setBusy(true); setMessage("");
@@ -40,9 +43,8 @@ export default function OwnerLoginPage() {
       });
       const body = await response.json() as { error?: string };
       if (!response.ok) throw new Error(body.error ?? "인증에 실패했습니다.");
-      const requestedReturn = new URLSearchParams(window.location.search).get("returnTo") ?? "/operator";
-      const returnTo = requestedReturn.startsWith("/") && !requestedReturn.startsWith("//") ? requestedReturn : "/operator";
-      window.location.assign(returnTo);
+      const returnTo = safeInternalReturnTo(new URLSearchParams(window.location.search).get("returnTo"));
+      router.replace(returnTo);
     } catch (error) { setMessage(error instanceof Error ? error.message : "인증 실패"); setBusy(false); }
   }
 

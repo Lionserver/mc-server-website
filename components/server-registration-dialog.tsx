@@ -4,6 +4,7 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { ImageCropEditor, prepareImageCropSession, type ImageCropSession } from "@/components/image-crop-editor";
 import { ServerCategoryTags } from "@/components/server-category-tags";
 import { ServerDescriptionEditor, type DescriptionPosterUpload } from "@/components/server-description-editor";
@@ -27,6 +28,7 @@ const initialStates = {
 } satisfies Partial<Record<AssetKind, string>>;
 
 export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMessage, loginReturnTo = "/?register=1" }: Props) {
+  const router = useRouter();
   const [assetStates, setAssetStates] = useState(initialStates);
   const [assets, setAssets] = useState<Partial<Record<AssetKind, File>>>({});
   const [previews, setPreviews] = useState<Partial<Record<AssetKind, string>>>({});
@@ -157,7 +159,7 @@ export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMess
         body: JSON.stringify(requestPayload),
       });
       const result = await response.json() as { server?: { id: string; title: string }; error?: string };
-      if (response.status === 401) { window.location.assign(`/login?returnTo=${encodeURIComponent(loginReturnTo)}`); return; }
+      if (response.status === 401) { router.push(`/login?returnTo=${encodeURIComponent(loginReturnTo)}`); return; }
       if (!response.ok || !result.server) throw new Error(result.error ?? "서버 등록에 실패했습니다.");
       createdServerId = result.server.id;
       createdServerTitle = result.server.title;

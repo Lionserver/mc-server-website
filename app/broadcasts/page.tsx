@@ -4,8 +4,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, ExternalLink, Eye, Radio, RefreshCw, Tv } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { PublicSiteHeader } from "@/components/public-site-header";
 import { ServerRegistrationDialog } from "@/components/server-registration-dialog";
+import { readThemePreference, storeThemePreference } from "@/lib/browser-preferences.mjs";
 import {
   STREAM_PREVIEW_CACHE_SECONDS, STREAM_PROFILE_CACHE_SECONDS, type MinecraftLiveStream, type MinecraftStreamsPayload, type StreamPlatform,
 } from "@/lib/minecraft-streams";
@@ -16,6 +18,7 @@ type PlatformFilter = "all" | StreamPlatform;
 const viewers = new Intl.NumberFormat("ko-KR");
 
 export default function MinecraftBroadcastsPage() {
+  const router = useRouter();
   const [payload, setPayload] = useState<MinecraftStreamsPayload | null>(null);
   const [filter, setFilter] = useState<PlatformFilter>("all");
   const [loading, setLoading] = useState(true);
@@ -51,8 +54,7 @@ export default function MinecraftBroadcastsPage() {
   }, [load]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("minecraft-kr-theme") as ThemeMode | null;
-    const next = stored ?? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const next = readThemePreference();
     document.documentElement.dataset.theme = next;
     const frame = window.requestAnimationFrame(() => setTheme(next));
     return () => window.cancelAnimationFrame(frame);
@@ -71,7 +73,9 @@ export default function MinecraftBroadcastsPage() {
             setRegistrationOpen(true);
             const url = new URL(window.location.href);
             url.searchParams.delete("register");
-            window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+            window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+          } else if (!session && new URLSearchParams(window.location.search).get("register") === "1") {
+            router.replace(`/login?returnTo=${encodeURIComponent("/broadcasts?register=1")}`);
           }
         }
       } catch {
@@ -83,7 +87,7 @@ export default function MinecraftBroadcastsPage() {
     void syncSession();
     window.addEventListener("focus", syncSession);
     return () => { active = false; window.removeEventListener("focus", syncSession); };
-  }, []);
+  }, [router]);
 
   const filtered = useMemo(() => payload?.streams.filter((stream) => filter === "all" || stream.platform === filter) ?? [], [filter, payload]);
   const chzzkCount = payload?.streams.filter((stream) => stream.platform === "chzzk").length ?? 0;
@@ -94,7 +98,7 @@ export default function MinecraftBroadcastsPage() {
     const next = theme === "light" ? "dark" : "light";
     setTheme(next);
     document.documentElement.dataset.theme = next;
-    window.localStorage.setItem("minecraft-kr-theme", next);
+    storeThemePreference(next);
   }
 
   function showToast(message: string) {
@@ -108,7 +112,7 @@ export default function MinecraftBroadcastsPage() {
       return;
     }
     if (!ownerSession) {
-      window.location.assign("/login?returnTo=/broadcasts?register=1");
+      router.push(`/login?returnTo=${encodeURIComponent("/broadcasts?register=1")}`);
       return;
     }
     setRegistrationOpen(true);
@@ -171,7 +175,7 @@ export default function MinecraftBroadcastsPage() {
     </main>
 
     <footer className="broadcast-footer"><div className="container"><span>MINECRAFT.KR · LIVE DIRECTORY</span><p>방송 정보와 이미지는 각 플랫폼의 공개 라이브 목록에서 확인하며, 시청은 해당 플랫폼에서 진행됩니다.</p><Link href="/">서버 목록으로 돌아가기</Link></div></footer>
-    <ServerRegistrationDialog open={registrationOpen} onOpenChange={setRegistrationOpen} onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => window.location.assign(`/operator?created=${serverId}`), 450); }} />
+    <ServerRegistrationDialog open={registrationOpen} onOpenChange={setRegistrationOpen} loginReturnTo="/broadcasts?register=1" onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => router.push(`/operator?created=${serverId}`), 450); }} />
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>;
 }

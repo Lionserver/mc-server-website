@@ -5,6 +5,7 @@ import { type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEv
 import * as Dialog from "@radix-ui/react-dialog";
 import { Activity, ArrowLeft, ArrowRightLeft, BadgeCheck, CheckCircle2, Crop, Crown, Download, ExternalLink, EyeOff, Gavel, ImageIcon, LogOut, MessageSquare, Minus, Network, PauseCircle, Pencil, Plug, Plus, RefreshCw, Save, Send, Server as ServerIcon, ShieldAlert, ShieldCheck, Timer, Trash2, TrendingUp, X } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ImageCropEditor, prepareImageCropSession, type ImageCropSession } from "@/components/image-crop-editor";
 import { ServerCategoryTags } from "@/components/server-category-tags";
 import { ServerRegistrationDialog } from "@/components/server-registration-dialog";
@@ -146,6 +147,7 @@ function bridgeConfigText(bridge: BridgeProvision) {
 }
 
 export default function OperatorPage() {
+  const router = useRouter();
   const [servers, setServers] = useState<ManagedServer[]>([]);
   const [selected, setSelected] = useState<ManagedServer | null>(null);
   const [loading, setLoading] = useState(true);
@@ -274,7 +276,12 @@ export default function OperatorPage() {
         const params = new URLSearchParams(window.location.search);
         const preferredId = params.get("created");
         setServers(next); setSelected(next.find((server) => server.id === preferredId) ?? next[0] ?? null);
-        if (params.get("register") === "1") setRegistrationOpen(true);
+        if (params.get("register") === "1") {
+          setRegistrationOpen(true);
+          params.delete("register");
+          const nextQuery = params.toString();
+          window.history.replaceState(window.history.state, "", `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`);
+        }
       })
       .catch((error: unknown) => { if (active) setMessage(error instanceof Error ? error.message : "불러오기 실패"); })
       .finally(() => { if (active) { setLoading(false); setAuthChecked(true); } });
@@ -356,7 +363,7 @@ export default function OperatorPage() {
   async function logout() {
     const response = await fetch("/api/auth/session", { method: "DELETE" });
     if (!response.ok) { setMessage("로그아웃에 실패했습니다."); return; }
-    window.location.assign("/login?returnTo=/operator");
+    router.replace("/login?returnTo=/operator");
   }
 
   async function requestTransfer(event: FormEvent<HTMLFormElement>) {

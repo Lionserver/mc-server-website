@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import { resolveThemePreference, safeInternalReturnTo } from "../lib/browser-preferences.mjs";
 
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -418,12 +419,35 @@ test("ships a structured server-introduction editor with safe poster uploads", a
 });
 
 test("server-renders the email owner login shell", async () => {
-  const response = await render("/login");
+  const [response, layout] = await Promise.all([
+    render("/login"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+  ]);
   assert.equal(response.status, 200);
   const html = await response.text();
+  const head = html.match(/<head[^>]*>[\s\S]*?<\/head>/i)?.[0] ?? "";
   assert.match(html, /이메일로 로그인/);
   assert.match(html, /인증 코드 받기/);
   assert.match(html, /비밀번호 없이 이메일 인증 코드/);
+  assert.match(head, /<script[^>]*>[\s\S]*minecraft-kr-theme[\s\S]*<\/script>/);
+  assert.match(head, /prefers-color-scheme: dark/);
+  assert.match(head, /document\.documentElement\.dataset\.theme/);
+  assert.match(layout, /storedTheme === "dark" \|\| storedTheme === "light"/);
+  assert.match(layout, /<html lang="ko" suppressHydrationWarning>/);
+});
+
+test("keeps post-login return targets internal and normalizes theme preferences", () => {
+  assert.equal(safeInternalReturnTo("/operator"), "/operator");
+  assert.equal(safeInternalReturnTo("/?register=1"), "/?register=1");
+  assert.equal(safeInternalReturnTo("/broadcasts?register=1#directory"), "/broadcasts?register=1#directory");
+  for (const unsafe of ["https://evil.example/", "//evil.example/", "/\\evil.example/", "javascript:alert(1)", "operator"]) {
+    assert.equal(safeInternalReturnTo(unsafe), "/operator");
+  }
+  assert.equal(safeInternalReturnTo(null), "/operator");
+  assert.equal(resolveThemePreference("dark", false), "dark");
+  assert.equal(resolveThemePreference("light", true), "light");
+  assert.equal(resolveThemePreference("broken", true), "dark");
+  assert.equal(resolveThemePreference(null, false), "light");
 });
 
 test("server-renders real policy destinations", async () => {
@@ -450,9 +474,10 @@ test("server-renders real policy destinations", async () => {
 });
 
 test("ships passwordless owner auth and audited ownership transfer flows", async () => {
-  const [login, home, header, operator, registration, admin, userAuth, ownership, worker, schema, migration, packageJson] = await Promise.all([
+  const [login, home, broadcasts, header, operator, registration, admin, userAuth, ownership, worker, schema, migration, packageJson] = await Promise.all([
     readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/broadcasts/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/public-site-header.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
@@ -470,11 +495,22 @@ test("ships passwordless owner auth and audited ownership transfer flows", async
   assert.match(userAuth, /api\.resend\.com\/emails/);
   assert.match(worker, /X-MKR-Authenticated-Owner/);
   assert.match(home, /ownerSessionChecked/);
+  assert.match(home, /router\.push\(`\/login\?returnTo=\$\{encodeURIComponent\("\/\?register=1"\)\}`\)/);
+  assert.match(home, /params\.delete\("register"\)/);
+  assert.match(login, /safeInternalReturnTo/);
+  assert.match(login, /router\.replace\(returnTo\)/);
+  assert.match(broadcasts, /encodeURIComponent\("\/broadcasts\?register=1"\)/);
+  assert.match(broadcasts, /loginReturnTo="\/broadcasts\?register=1"/);
+  assert.match(registration, /router\.push\(`\/login\?returnTo=\$\{encodeURIComponent\(loginReturnTo\)\}`\)/);
+  assert.doesNotMatch(home, /window\.location\.assign\("\/login/);
+  assert.doesNotMatch(login, /window\.location\.(?:assign|replace)/);
+  assert.doesNotMatch(broadcasts, /window\.location\.assign\("\/login/);
   assert.match(header, /내 서버 관리 · 로그인됨/);
   assert.doesNotMatch(home, /nav-owner-link/);
   assert.match(registration, /loginReturnTo = "\/\?register=1"/);
   assert.match(operator, /ServerRegistrationDialog/);
   assert.match(operator, /setRegistrationOpen\(true\)/);
+  assert.match(operator, /params\.delete\("register"\)/);
   assert.match(home, /이 서버 주장하기/);
   assert.match(home, /result\.challenge/);
   assert.match(operator, /서버 관리 양도/);
@@ -703,6 +739,11 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(css, /:focus-visible/);
   assert.match(css, /@media \(max-width: 600px\)/);
   assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /--accent-ink:#ffffff/);
+  assert.match(css, /\[data-theme="dark"\] \{[\s\S]*?--accent-ink:#04110c/);
+  assert.match(css, /\.submit-register \{[^}]*background:var\(--accent\)[^}]*color:var\(--accent-ink\)/);
+  assert.match(css, /\.owner-login-card form > button \{[^}]*background:var\(--accent\)[^}]*color:var\(--accent-ink\)/);
+  assert.match(css, /\.register-modal \{ width:calc\(100% - 32px\); max-height:calc\(100vh - 32px\); max-height:calc\(100dvh - 32px\); \}/);
   assert.match(css, /Shared Minecraft\.kr dropdown treatment/);
   assert.match(css, /select:not\(\[multiple\]\) \{/);
   assert.match(css, /\.directory-select-content/);

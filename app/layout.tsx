@@ -2,6 +2,21 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://minecraft.kr";
+const themeBootstrapScript = `
+(() => {
+  const storageKey = "minecraft-kr-theme";
+  let storedTheme = null;
+  try {
+    storedTheme = window.localStorage.getItem(storageKey);
+  } catch {}
+  let systemTheme = "light";
+  try {
+    systemTheme = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {}
+  document.documentElement.dataset.theme =
+    storedTheme === "dark" || storedTheme === "light" ? storedTheme : systemTheme;
+})();
+`;
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -26,7 +41,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="ko">
+    <html lang="ko" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
+      </head>
       <body>{children}</body>
     </html>
   );

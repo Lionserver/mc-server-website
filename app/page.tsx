@@ -5,7 +5,9 @@ import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, us
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import * as Switch from "@radix-ui/react-switch";
+import { useRouter } from "next/navigation";
 import { Area, AreaChart, CartesianGrid, ReferenceDot, ReferenceLine, Tooltip, XAxis, YAxis, type TooltipContentProps } from "recharts";
+import { readThemePreference, storeThemePreference } from "@/lib/browser-preferences.mjs";
 import {
   Activity, ArrowRightLeft, ArrowUpRight, BadgeCheck, Check, CheckCircle2, ChevronDown, ChevronUp, Clock3, Code2, Copy,
   ExternalLink, MessageCircle, Search, ShieldCheck, Signal,
@@ -109,6 +111,7 @@ const formatPlayers = (value: number) => number.format(value);
 const NEW_SERVER_WINDOW_SECONDS = 7 * 86_400;
 
 export default function Home() {
+  const router = useRouter();
   const [directoryView, setDirectoryView] = useState<DirectoryView>("all");
   const [query, setQuery] = useState("");
   const [edition, setEdition] = useState<Edition>("ALL");
@@ -325,8 +328,7 @@ export default function Home() {
   }, [loadServers, refreshSelected]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("minecraft-kr-theme") as ThemeMode | null;
-    const next = stored ?? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const next = readThemePreference();
     document.documentElement.dataset.theme = next;
     const frame = window.requestAnimationFrame(() => setTheme(next));
     return () => window.cancelAnimationFrame(frame);
@@ -348,7 +350,6 @@ export default function Home() {
     let active = true;
     const frame = window.requestAnimationFrame(() => {
       const params = new URLSearchParams(window.location.search);
-      if (params.get("register") === "1") setRegistrationOpen(true);
       const claimServerId = params.get("claim");
       const detailServerId = params.get("server");
       const detailServer = detailServerId ? servers.find((item) => item.id === detailServerId) : undefined;
@@ -371,11 +372,28 @@ export default function Home() {
     return () => { active = false; window.cancelAnimationFrame(frame); };
   }, [servers, openServer]);
 
+  useEffect(() => {
+    if (!ownerSessionChecked) return;
+    const frame = window.requestAnimationFrame(() => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("register") !== "1") return;
+      if (!ownerSession) {
+        router.replace(`/login?returnTo=${encodeURIComponent("/?register=1")}`);
+        return;
+      }
+      setRegistrationOpen(true);
+      params.delete("register");
+      const nextQuery = params.toString();
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [ownerSession, ownerSessionChecked, router]);
+
   function toggleTheme() {
     const next = theme === "light" ? "dark" : "light";
     setTheme(next);
     document.documentElement.dataset.theme = next;
-    window.localStorage.setItem("minecraft-kr-theme", next);
+    storeThemePreference(next);
   }
 
   function startRegistration() {
@@ -384,7 +402,7 @@ export default function Home() {
       return;
     }
     if (!ownerSession) {
-      window.location.assign("/login?returnTo=/?register=1");
+      router.push(`/login?returnTo=${encodeURIComponent("/?register=1")}`);
       return;
     }
     setRegistrationOpen(true);
@@ -415,7 +433,7 @@ export default function Home() {
   async function openServerClaim(server: Server) {
     const session = await fetch("/api/auth/session", { cache: "no-store" });
     if (!session.ok) {
-      window.location.assign(`/login?returnTo=/?claim=${encodeURIComponent(server.id)}`);
+      router.push(`/login?returnTo=${encodeURIComponent(`/?claim=${server.id}`)}`);
       return;
     }
     setSelected(null); setClaimTarget(server); setClaimResult(null); setClaimMessage("");
@@ -562,7 +580,7 @@ export default function Home() {
         {claimTarget && <ClaimServerDialog server={claimTarget} result={claimResult} busy={claimBusy} message={claimMessage} onCreate={createClaim} onVerify={verifyClaim} />}
       </Dialog.Root>
 
-      <ServerRegistrationDialog open={registrationOpen} onOpenChange={setRegistrationOpen} onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => window.location.assign(`/operator?created=${serverId}`), 450); }} />
+      <ServerRegistrationDialog open={registrationOpen} onOpenChange={setRegistrationOpen} onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => router.push(`/operator?created=${serverId}`), 450); }} />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
