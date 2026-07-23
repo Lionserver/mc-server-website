@@ -75,7 +75,7 @@ export async function GET(request: Request) {
     const activeServers = serverResults.filter((item) => !item.deletedAt && !["blacklisted", "suspended", "blinded"].includes(item.status));
     const activeEnforcements = enforcements.results.filter((item) => (item as { status?: string }).status === "active");
     return Response.json({
-      admin: { email: session.email, expiresAt: session.expiresAt },
+      admin: { email: session.email, expiresAt: session.expiresAt, authMode: session.authMode },
       stats: {
         totalServers: activeServers.length,
         premiumServers: activeServers.filter((item) => item.premiumActive).length,

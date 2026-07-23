@@ -1,5 +1,6 @@
 import { directoryEnv, ensureDirectorySchema, type DirectoryEnv } from "@/lib/server-directory";
 import { resolveMinecraftEndpoint } from "@/lib/minecraft-ping";
+import { temporaryAdminSession } from "@/lib/admin-temporary-access.mjs";
 
 export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_EMAIL?: string;
@@ -7,9 +8,11 @@ export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_TOTP_SECRET?: string;
   ADMIN_LOCAL_PREVIEW?: string;
   ADMIN_LOCAL_PASSWORD?: string;
+  ADMIN_TEMP_BYPASS_EMAIL?: string;
+  ADMIN_TEMP_BYPASS_UNTIL?: string;
 }
 
-export type AdminSession = { email: string; expiresAt: number };
+export type AdminSession = { email: string; expiresAt: number; authMode: "session" | "temporary-bypass" };
 export type BlacklistKind = "ip" | "address";
 export type ServerEnforcementKind = "warning" | "suspension" | "blind";
 
@@ -226,27 +229,54 @@ export async function loginAdmin(request: Request, payload: unknown) {
   return { email: configuredEmail, expiresAt, cookie: sessionCookie(request, token, SESSION_SECONDS) };
 }
 
-export async function requireAdmin(request: Request, options?: { mutating?: boolean }): Promise<{ environment: AdminEnvironment; session: AdminSession; tokenHash: string }> {
+export async function requireAdmin(request: Request, options?: { mutating?: boolean }): Promise<{ environment: AdminEnvironment; session: AdminSession; tokenHash: string; temporary: boolean; temporaryBypassExpiresAt: number | null }> {
   if (options?.mutating) assertSameOrigin(request);
   const environment = await adminEnv();
   await ensureAdminSchema(environment.DB);
-  const token = cookieValue(request.headers.get("cookie") ?? "", ADMIN_COOKIE);
-  if (!token || token.length < 32) throw Response.json({ error: "총관리자 로그인이 필요합니다." }, { status: 401 });
-  const tokenHash = await sha256Hex(token);
   const now = unixNow();
-  const row = await environment.DB.prepare("SELECT admin_email, expires_at, last_seen_at FROM admin_sessions WHERE token_hash = ? AND expires_at > ?")
-    .bind(tokenHash, now).first<{ admin_email: string; expires_at: number; last_seen_at: number }>();
-  if (!row) throw Response.json({ error: "관리자 세션이 만료되었습니다." }, { status: 401 });
-  if (now - row.last_seen_at > 300) {
-    await environment.DB.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
+  const temporarySession = temporaryAdminSession(
+    request.headers.get("oai-authenticated-user-email"),
+    environment.ADMIN_TEMP_BYPASS_EMAIL,
+    environment.ADMIN_TEMP_BYPASS_UNTIL,
+    now,
+  );
+  const token = cookieValue(request.headers.get("cookie") ?? "", ADMIN_COOKIE);
+  if (token && token.length >= 32) {
+    const tokenHash = await sha256Hex(token);
+    const row = await environment.DB.prepare("SELECT admin_email, expires_at, last_seen_at FROM admin_sessions WHERE token_hash = ? AND expires_at > ?")
+      .bind(tokenHash, now).first<{ admin_email: string; expires_at: number; last_seen_at: number }>();
+    if (row) {
+      if (now - row.last_seen_at > 300) {
+        await environment.DB.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
+      }
+      return {
+        environment,
+        session: { email: row.admin_email, expiresAt: row.expires_at, authMode: "session" },
+        tokenHash,
+        temporary: false,
+        temporaryBypassExpiresAt: temporarySession?.expiresAt ?? null,
+      };
+    }
   }
-  return { environment, session: { email: row.admin_email, expiresAt: row.expires_at }, tokenHash };
+  if (temporarySession && token !== temporaryBypassOptOutToken(temporarySession.expiresAt)) {
+    const tokenHash = await sha256Hex(`temporary-admin-access|${temporarySession.email}|${temporarySession.expiresAt}`);
+    return {
+      environment,
+      session: { ...temporarySession, authMode: "temporary-bypass" },
+      tokenHash,
+      temporary: true,
+      temporaryBypassExpiresAt: temporarySession.expiresAt,
+    };
+  }
+  if (token) throw Response.json({ error: "관리자 세션이 만료되었습니다." }, { status: 401 });
+  throw Response.json({ error: "총관리자 로그인이 필요합니다." }, { status: 401 });
 }
 
 export async function logoutAdmin(request: Request) {
-  const { environment, session, tokenHash } = await requireAdmin(request, { mutating: true });
-  await environment.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
-  await writeAudit(environment.DB, session.email, "admin.logout", "session", tokenHash.slice(0, 12), {});
+  const { environment, session, tokenHash, temporary, temporaryBypassExpiresAt } = await requireAdmin(request, { mutating: true });
+  if (!temporary) await environment.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
+  await writeAudit(environment.DB, session.email, temporary ? "admin.temporary_access.logout" : "admin.logout", "session", tokenHash.slice(0, 12), {});
+  if (temporaryBypassExpiresAt) return temporaryBypassOptOutCookie(request, temporaryBypassExpiresAt);
   return expiredSessionCookie(request);
 }
 
@@ -457,6 +487,14 @@ function sessionCookie(request: Request, token: string, maxAge: number) {
 function expiredSessionCookie(request: Request) {
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return `${ADMIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+}
+
+function temporaryBypassOptOutToken(expiresAt: number) {
+  return `temporary-disabled-${expiresAt}`;
+}
+
+function temporaryBypassOptOutCookie(request: Request, expiresAt: number) {
+  return sessionCookie(request, temporaryBypassOptOutToken(expiresAt), Math.max(0, expiresAt - unixNow()));
 }
 
 function cookieValue(header: string, name: string) {

@@ -3,7 +3,10 @@ import { adminErrorResponse, loginAdmin, logoutAdmin, requireAdmin } from "@/lib
 export async function GET(request: Request) {
   try {
     const { session } = await requireAdmin(request);
-    return Response.json({ authenticated: true, email: session.email, expiresAt: session.expiresAt });
+    return Response.json(
+      { authenticated: true, email: session.email, expiresAt: session.expiresAt, authMode: session.authMode },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     return adminErrorResponse(error);
   }

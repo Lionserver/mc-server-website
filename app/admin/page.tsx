@@ -50,7 +50,7 @@ type AdminAuctionDashboard = {
   currentSlots: { capacity: number; occupied: number; vacancies: number; endsAt: number; placements: AdminAuctionDashboard["placements"] };
 };
 type Overview = {
-  admin: { email: string; expiresAt: number };
+  admin: { email: string; expiresAt: number; authMode: "session" | "temporary-bypass" };
   stats: { totalServers: number; premiumServers: number; blacklistedServers: number; activeEnforcements: number; unreadMessages: number; pendingOwnership: number };
   servers: AdminServer[]; blacklist: BlacklistEntry[]; enforcements: ServerEnforcement[]; conversations: Conversation[]; audits: Audit[]; identities: IdentityAccount[];
   ownership: { claims: AdminOwnershipClaim[]; transfers: AdminOwnershipTransfer[] };
@@ -114,7 +114,7 @@ export default function AdminPage() {
   return <AdminFrame>
     <header className="admin-topbar">
       <div><span className="admin-eyebrow">MINECRAFT.KR CONTROL</span><h1>총관리자 시스템</h1></div>
-      <div className="admin-top-actions"><AdminRealtimeBadge status={adminChatConnection} /><span className="admin-session"><ShieldCheck size={15} /> {overview?.admin.email}</span><button onClick={() => run(loadOverview, "최신 데이터로 갱신했습니다.")} disabled={busy}><RefreshCw size={15} /> 새로고침</button><button onClick={logout}><LogOut size={15} /> 로그아웃</button></div>
+      <div className="admin-top-actions"><AdminRealtimeBadge status={adminChatConnection} /><span className="admin-session"><ShieldCheck size={15} /> {overview?.admin.email}{overview?.admin.authMode === "temporary-bypass" ? ` · 임시 접근 ${dateTime(overview.admin.expiresAt)} 만료` : ""}</span><button onClick={() => run(loadOverview, "최신 데이터로 갱신했습니다.")} disabled={busy}><RefreshCw size={15} /> 새로고침</button><button onClick={logout}><LogOut size={15} /> 로그아웃</button></div>
     </header>
     {overview && <>
       <section className="admin-stats" aria-label="주요 현황">

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import { MAX_TEMPORARY_ADMIN_ACCESS_SECONDS, temporaryAdminSession } from "../lib/admin-temporary-access.mjs";
 import { resolveThemePreference, safeInternalReturnTo } from "../lib/browser-preferences.mjs";
 
 async function render(pathname = "/") {
@@ -254,6 +255,41 @@ test("server-renders the protected administrator shell", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /총관리자 보안 세션 확인 중/);
+});
+
+test("limits temporary administrator access to the authenticated Sites user and one hour", async () => {
+  const now = 1_800_000_000;
+  const expiresAt = now + MAX_TEMPORARY_ADMIN_ACCESS_SECONDS;
+  assert.deepEqual(
+    temporaryAdminSession("Owner@Example.com", "owner@example.com", String(expiresAt), now),
+    { email: "owner@example.com", expiresAt },
+  );
+  assert.equal(temporaryAdminSession("other@example.com", "owner@example.com", String(expiresAt), now), null);
+  assert.equal(temporaryAdminSession(null, "owner@example.com", String(expiresAt), now), null);
+  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", String(now), now), null);
+  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", String(expiresAt + 1), now), null);
+  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", ` ${expiresAt}`, now), null);
+  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", "1.8000036e9", now), null);
+
+  const [security, sessionRoute, adminPage, envExample, devVarsExample] = await Promise.all([
+    readFile(new URL("../lib/admin-security.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/session/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../.env.example", import.meta.url), "utf8"),
+    readFile(new URL("../.dev.vars.example", import.meta.url), "utf8"),
+  ]);
+  assert.match(security, /oai-authenticated-user-email/);
+  assert.match(security, /if \(options\?\.mutating\) assertSameOrigin\(request\)/);
+  assert.match(security, /temporary: true/);
+  assert.match(security, /temporaryBypassOptOutCookie/);
+  assert.match(security, /temporary-disabled-/);
+  assert.match(sessionRoute, /authMode: session\.authMode/);
+  assert.match(sessionRoute, /"Cache-Control": "no-store"/);
+  assert.match(adminPage, /임시 접근/);
+  assert.match(envExample, /ADMIN_TEMP_BYPASS_EMAIL=""/);
+  assert.match(envExample, /ADMIN_TEMP_BYPASS_UNTIL=""/);
+  assert.match(devVarsExample, /ADMIN_TEMP_BYPASS_EMAIL=""/);
+  assert.match(devVarsExample, /ADMIN_TEMP_BYPASS_UNTIL=""/);
 });
 
 test("ships expiring server enforcement controls and formatted auction bids", async () => {
