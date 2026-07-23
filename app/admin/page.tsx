@@ -1,9 +1,10 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRightLeft, Ban, BarChart3, CircleDollarSign, Clock3, Crown, EyeOff, Gavel, HardDrive, LogOut, MessageSquare, PauseCircle, Plus, RefreshCw, Search, Server, ShieldAlert, ShieldCheck, Trash2, Trophy } from "lucide-react";
+import { ArrowRightLeft, Ban, BarChart3, CircleDollarSign, Clock3, Crown, EyeOff, Gavel, HardDrive, LogOut, Megaphone, MessageSquare, PauseCircle, Pencil, Plus, RefreshCw, Save, Search, Server, ShieldAlert, ShieldCheck, Trash2, Trophy } from "lucide-react";
 import { useChatRealtime, type ChatConnectionStatus } from "@/lib/use-chat-realtime";
 import type { ChatRealtimeEvent } from "@/lib/chat-realtime";
+import { announcementPhase } from "@/lib/site-announcement-lifecycle.mjs";
 
 type AdminServer = {
   id: string; ownerEmail: string; title: string; address: string; port: number; status: string; deletedAt: number | null;
@@ -21,6 +22,11 @@ type Conversation = { server_id: string; title: string; owner_email: string; unr
 type Audit = { id: string; admin_email: string; action: string; target_type: string; target_id: string; details: Record<string, unknown>; created_at: number };
 type IdentityAccount = { id: string; email: string; email_verified_at: number; last_login_at: number; identity_verification_status: string; identity_verified_at: number | null; identity_provider: string; identity_reference: string; created_at: number; updated_at: number };
 type Message = { id: string; sender_role: "admin" | "owner"; sender_email: string; body: string; created_at: number };
+type AdminAnnouncement = {
+  id: string; title: string; summary: string; detail: string; status: "draft" | "published" | "archived";
+  startsAt: number; endsAt: number; revision: number; createdBy: string; updatedBy: string;
+  createdAt: number; updatedAt: number; deletedAt: number | null; deletedBy: string | null;
+};
 type VoteLog = {
   id: string; serverId: string; serverTitle: string; serverAddress: string; ownerEmail: string; nickname: string;
   minecraftUuid: string | null; voteDay: string; rewardStatus: string; ipMasked: string; ipKey: string;
@@ -53,13 +59,21 @@ type Overview = {
   admin: { email: string; expiresAt: number; authMode: "session" | "temporary-bypass" };
   stats: { totalServers: number; premiumServers: number; blacklistedServers: number; activeEnforcements: number; unreadMessages: number; pendingOwnership: number };
   servers: AdminServer[]; blacklist: BlacklistEntry[]; enforcements: ServerEnforcement[]; conversations: Conversation[]; audits: Audit[]; identities: IdentityAccount[];
+  announcements: AdminAnnouncement[];
   ownership: { claims: AdminOwnershipClaim[]; transfers: AdminOwnershipTransfer[] };
 };
-type Tab = "servers" | "votes" | "enforcements" | "identity" | "ownership" | "premium" | "blacklist" | "messages" | "cache" | "audit";
+type Tab = "announcements" | "servers" | "votes" | "enforcements" | "identity" | "ownership" | "premium" | "blacklist" | "messages" | "cache" | "audit";
 
 const dateTime = (unix: number | null) => unix ? new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" }).format(unix * 1000) : "-";
 const auctionDateTime = (unix: number) => `${new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", dateStyle: "medium", timeStyle: "short" }).format(unix * 1000)} KST`;
 const toUnix = (value: string) => value ? Math.floor(new Date(value).getTime() / 1000) : null;
+const announcementDateTime = (unix: number) => `${new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", dateStyle: "medium", timeStyle: "short" }).format(unix * 1000)} KST`;
+const toKstInput = (unix: number) => new Date((unix + 9 * 60 * 60) * 1000).toISOString().slice(0, 16);
+const fromKstInput = (value: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
+  const parsed = Date.parse(`${value}:00+09:00`);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+};
 const VOTE_BLOCK_SECONDS: Record<string, number> = { "1d": 86_400, "7d": 7 * 86_400, "30d": 30 * 86_400, "90d": 90 * 86_400 };
 
 export default function AdminPage() {
@@ -70,6 +84,7 @@ export default function AdminPage() {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [latestChatEvent, setLatestChatEvent] = useState<ChatRealtimeEvent | null>(null);
+  const [adminNow, setAdminNow] = useState(() => Math.floor(Date.now() / 1000));
 
   const loadOverview = useCallback(async () => {
     const response = await fetch("/api/admin/overview", { cache: "no-store" });
@@ -105,6 +120,11 @@ export default function AdminPage() {
     return () => window.clearTimeout(timer);
   }, [overview?.admin.authMode, overview?.admin.expiresAt]);
 
+  useEffect(() => {
+    const interval = window.setInterval(() => setAdminNow(Math.floor(Date.now() / 1000)), 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   const run = async (work: () => Promise<void>, message: string) => {
     setBusy(true); setNotice("");
     try { await work(); setNotice(message); }
@@ -137,11 +157,13 @@ export default function AdminPage() {
       </section>
       <nav className="admin-tabs" aria-label="총관리자 메뉴">
         {([[
-          "servers", "서버 제어", Server
+          "announcements", "공지사항", Megaphone
+        ], ["servers", "서버 제어", Server
         ], ["votes", "추천 기록", Trophy], ["enforcements", "서버 제재", ShieldAlert], ["identity", "본인인증", ShieldCheck], ["ownership", "소유권 심사", ArrowRightLeft], ["premium", "프리미엄", Crown], ["blacklist", "블랙리스트", Ban], ["messages", "직통라인", MessageSquare], ["cache", "캐시 정리", HardDrive], ["audit", "감사 로그", BarChart3]] as const).map(([key, label, Icon]) =>
-          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}><Icon size={16} />{label}{key === "enforcements" && overview.stats.activeEnforcements > 0 && <b>{overview.stats.activeEnforcements}</b>}{key === "messages" && overview.stats.unreadMessages > 0 && <b>{overview.stats.unreadMessages}</b>}{key === "ownership" && overview.stats.pendingOwnership > 0 && <b>{overview.stats.pendingOwnership}</b>}{key === "identity" && overview.identities.filter((item) => item.identity_verification_status !== "verified").length > 0 && <b>{overview.identities.filter((item) => item.identity_verification_status !== "verified").length}</b>}</button>)}
+          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}><Icon size={16} />{label}{key === "announcements" && overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length > 0 && <b>{overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length}</b>}{key === "enforcements" && overview.stats.activeEnforcements > 0 && <b>{overview.stats.activeEnforcements}</b>}{key === "messages" && overview.stats.unreadMessages > 0 && <b>{overview.stats.unreadMessages}</b>}{key === "ownership" && overview.stats.pendingOwnership > 0 && <b>{overview.stats.pendingOwnership}</b>}{key === "identity" && overview.identities.filter((item) => item.identity_verification_status !== "verified").length > 0 && <b>{overview.identities.filter((item) => item.identity_verification_status !== "verified").length}</b>}</button>)}
       </nav>
       {notice && <div className="admin-notice" role="status">{notice}</div>}
+      {tab === "announcements" && <AnnouncementControl entries={overview.announcements} busy={busy} run={run} refresh={loadOverview} now={adminNow} />}
       {tab === "servers" && <ServerControl servers={overview.servers} busy={busy} run={run} refresh={loadOverview} />}
       {tab === "votes" && <VoteLogControl servers={overview.servers} />}
       {tab === "enforcements" && <EnforcementControl entries={overview.enforcements} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} />}
@@ -636,6 +658,147 @@ function CacheControl({ busy, run }: Pick<ControlProps, "busy" | "run">) {
     {lastCleanup && <div className="admin-cache-result"><ShieldCheck size={17} /><span><b>{lastCleanup.deleted.toLocaleString()}개 · {formatBytes(lastCleanup.deletedBytes)} 삭제</b><small>{lastCleanup.retained.toLocaleString()}개 유지{lastCleanup.skippedPlatforms.length ? ` · 응답 지연으로 ${lastCleanup.skippedPlatforms.join(", ")} 보존` : " · 모든 플랫폼 확인 완료"}</small></span></div>}
     <div className="admin-cache-action"><div><h3>지금 정리</h3><p>서버 아이콘·배너·상세소개 이미지는 건드리지 않고 방송 캐시만 삭제합니다. 라이브 소스 응답이 지연된 플랫폼은 안전하게 보존합니다.</p></div><button className="admin-danger-button" type="button" onClick={() => void clean()} disabled={busy || !stats}>{busy ? "정리 중…" : <><Trash2 size={15} /> 종료 방송 캐시 정리</>}</button></div>
   </section>;
+}
+
+type AnnouncementFormState = {
+  title: string;
+  summary: string;
+  detail: string;
+  status: "draft" | "published";
+  startsAt: string;
+  endsAt: string;
+  revision: number | null;
+};
+
+function freshAnnouncementForm(): AnnouncementFormState {
+  const now = Math.floor(Date.now() / 60_000) * 60;
+  return {
+    title: "",
+    summary: "",
+    detail: "",
+    status: "published",
+    startsAt: toKstInput(now),
+    endsAt: toKstInput(now + 2 * 60 * 60),
+    revision: null,
+  };
+}
+
+function AnnouncementControl({ entries, busy, run, refresh, now }: {
+  entries: AdminAnnouncement[];
+  busy: boolean;
+  run: ControlProps["run"];
+  refresh: () => Promise<void>;
+  now: number;
+}) {
+  const [editingId, setEditingId] = useState("");
+  const [form, setForm] = useState<AnnouncementFormState>(() => freshAnnouncementForm());
+  const isEditing = editingId.length > 0;
+  const activeCount = entries.filter((entry) => announcementPhase(entry, now) === "active").length;
+  const scheduledCount = entries.filter((entry) => announcementPhase(entry, now) === "scheduled").length;
+
+  const reset = () => {
+    setEditingId("");
+    setForm(freshAnnouncementForm());
+  };
+  const edit = (entry: AdminAnnouncement) => {
+    if (entry.deletedAt != null) return;
+    setEditingId(entry.id);
+    setForm({
+      title: entry.title,
+      summary: entry.summary,
+      detail: entry.detail,
+      status: entry.status === "published" ? "published" : "draft",
+      startsAt: toKstInput(entry.startsAt),
+      endsAt: toKstInput(entry.endsAt),
+      revision: entry.revision,
+    });
+  };
+  const setDuration = (seconds: number) => setForm((current) => {
+    const startsAt = fromKstInput(current.startsAt) ?? Math.floor(Date.now() / 60_000) * 60;
+    return { ...current, endsAt: toKstInput(startsAt + seconds) };
+  });
+  const refreshBestEffort = async () => {
+    try {
+      await refresh();
+    } catch {
+      window.setTimeout(() => void refresh().catch(() => undefined), 1_500);
+    }
+  };
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    void run(async () => {
+      const startsAt = fromKstInput(form.startsAt);
+      const endsAt = fromKstInput(form.endsAt);
+      if (startsAt == null || endsAt == null) throw new Error("공지 시작일과 종료일을 KST 기준으로 입력해 주세요.");
+      const payload = { ...form, startsAt, endsAt, revision: form.revision ?? undefined };
+      if (isEditing) await jsonRequest(`/api/admin/announcements/${editingId}`, "PATCH", payload);
+      else await jsonRequest("/api/admin/announcements", "POST", payload);
+      reset();
+      window.dispatchEvent(new Event("site-announcements:refresh"));
+      await refreshBestEffort();
+    }, isEditing ? "공지사항을 수정했습니다." : "공지사항을 저장했습니다.");
+  };
+  const archive = () => {
+    if (!isEditing || form.revision == null) return;
+    if (!window.confirm(`“${form.title}” 공지를 내리고 보관할까요? 방문자 화면에서 즉시 사라집니다.`)) return;
+    void run(async () => {
+      await jsonRequest(`/api/admin/announcements/${editingId}`, "DELETE", { revision: form.revision });
+      reset();
+      window.dispatchEvent(new Event("site-announcements:refresh"));
+      await refreshBestEffort();
+    }, "공지사항을 내리고 기록으로 보관했습니다.");
+  };
+
+  return <section className="admin-panel admin-announcement-panel">
+    <div className="admin-section-head">
+      <div><span className="admin-eyebrow">SCHEDULED SERVICE NOTICE</span><h2>전 페이지 공지사항</h2><p>설정한 KST 기간에만 모든 페이지 최상단에 고정되며, 방문자가 누르면 상세 안내가 열립니다.</p></div>
+      <div className="admin-announcement-summary"><span><b>{activeCount}</b> 현재 게시</span><span><b>{scheduledCount}</b> 예약</span><button type="button" onClick={reset}><Plus size={14} /> 새 공지</button></div>
+    </div>
+    <div className="admin-announcement-layout">
+      <form className="admin-announcement-form" onSubmit={submit}>
+        <div className="admin-announcement-form-head"><div><Megaphone size={18} /><span><b>{isEditing ? "공지 수정" : "새 공지 작성"}</b><small>{isEditing ? `revision ${form.revision}` : "기간과 내용을 입력해 바로 예약할 수 있습니다."}</small></span></div>{isEditing && <button type="button" onClick={reset}>편집 취소</button>}</div>
+        <label>공지 제목 <span>{form.title.length}/120</span><input value={form.title} maxLength={120} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="예: 정기 서버 점검 안내" required /></label>
+        <label>상단 배너 요약 <span>{form.summary.length}/300</span><input value={form.summary} maxLength={300} onChange={(event) => setForm({ ...form, summary: event.target.value })} placeholder="점검 시간과 영향을 짧게 알려주세요." required /></label>
+        <div className="admin-announcement-grid">
+          <label>게시 상태<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as "draft" | "published" })}><option value="published">게시·예약</option><option value="draft">임시저장</option></select></label>
+          <label>시작일 · KST<input type="datetime-local" value={form.startsAt} onChange={(event) => setForm({ ...form, startsAt: event.target.value })} required /></label>
+          <label>종료일 · KST<input type="datetime-local" value={form.endsAt} onChange={(event) => setForm({ ...form, endsAt: event.target.value })} required /></label>
+        </div>
+        <div className="admin-announcement-presets" aria-label="공지 기간 빠른 설정"><span>기간 빠른 설정</span>{([["1시간", 3_600], ["6시간", 21_600], ["1일", 86_400], ["3일", 259_200], ["7일", 604_800]] as const).map(([label, seconds]) => <button type="button" key={label} onClick={() => setDuration(seconds)}>{label}</button>)}</div>
+        <label>상세 내용 <span>{form.detail.length}/5,000</span><textarea value={form.detail} maxLength={5_000} onChange={(event) => setForm({ ...form, detail: event.target.value })} placeholder={"점검 사유, 영향 범위, 예상 종료 시각과 이용자 안내를 자세히 입력하세요.\n줄바꿈은 상세 팝업에 그대로 표시됩니다."} required /></label>
+        <div className="admin-announcement-preview" aria-label="공지 배너 미리보기"><span><Megaphone size={13} /> 공지</span><div><b>{form.title || "공지 제목 미리보기"}</b><small>{form.summary || "상단 배너에 표시될 짧은 안내입니다."}</small></div></div>
+        <div className="admin-announcement-actions">
+          {isEditing && <button className="admin-inline-danger" type="button" disabled={busy} onClick={archive}><Trash2 size={14} /> 공지 내리기</button>}
+          <button className="admin-primary" type="submit" disabled={busy}><Save size={14} /> {busy ? "저장 중…" : isEditing ? "변경사항 저장" : "공지 저장"}</button>
+        </div>
+      </form>
+      <aside className="admin-announcement-list">
+        <div className="admin-list-title">공지 이력 · {entries.length}건</div>
+        {entries.length ? entries.map((entry) => {
+          const phase = announcementPhase(entry, now);
+          return <article key={entry.id} className={`${editingId === entry.id ? "active " : ""}${entry.deletedAt != null ? "deleted" : ""}`}>
+            <button type="button" onClick={() => edit(entry)} disabled={entry.deletedAt != null}>
+              <span className="admin-announcement-item-head"><b>{entry.title}</b><i className={`phase-${phase}`}>{announcementPhaseLabel(phase)}</i></span>
+              <small>{entry.summary}</small>
+              <time>{announcementDateTime(entry.startsAt)}<br />– {announcementDateTime(entry.endsAt)}</time>
+              {entry.deletedAt == null && <em><Pencil size={12} /> 수정</em>}
+            </button>
+          </article>;
+        }) : <Empty text="작성된 공지사항이 없습니다." />}
+      </aside>
+    </div>
+  </section>;
+}
+
+function announcementPhaseLabel(phase: string) {
+  return ({
+    active: "게시 중",
+    scheduled: "예약",
+    expired: "종료",
+    draft: "임시저장",
+    archived: "보관",
+    deleted: "삭제됨",
+  } as Record<string, string>)[phase] ?? phase;
 }
 
 function AuditLog({ entries }: { entries: Audit[] }) {

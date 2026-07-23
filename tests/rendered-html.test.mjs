@@ -4,6 +4,7 @@ import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import { MAX_TEMPORARY_ADMIN_ACCESS_SECONDS, temporaryAdminSession } from "../lib/admin-temporary-access.mjs";
 import { resolveThemePreference, safeInternalReturnTo } from "../lib/browser-preferences.mjs";
+import { announcementPhase, nextAnnouncementTransition } from "../lib/site-announcement-lifecycle.mjs";
 
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -1077,4 +1078,72 @@ test("automatically removes ended broadcast caches without touching durable serv
   assert.match(admin, /캐시 정리/);
   assert.match(admin, /종료 방송 캐시 정리/);
   assert.match(css, /\.admin-cache-summary/);
+});
+
+test("ships scheduled global notices with secure admin lifecycle controls", async () => {
+  const [
+    layout, banner, admin, publicRoute, collectionRoute, itemRoute, model, schema, migration, css, smoke,
+  ] = await Promise.all([
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/site-announcement-banner.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/announcements/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/announcements/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/announcements/[announcementId]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/site-announcements.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0022_watery_steve_rogers.sql", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/site-announcements-smoke.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(layout, /<SiteAnnouncementBanner initialPayload=\{initialAnnouncements\} \/>/);
+  assert.match(layout, /publicAnnouncementState/);
+  assert.match(banner, /fetch\("\/api\/announcements", \{ cache: "no-store" \}\)/);
+  assert.match(banner, /Dialog\.Trigger/);
+  assert.match(banner, /Dialog\.Content/);
+  assert.match(banner, /ResizeObserver/);
+  assert.match(banner, /requestSequenceRef/);
+  assert.match(banner, /aria-pressed/);
+  assert.match(banner, /site-announcement-detail/);
+  assert.doesNotMatch(banner, /dangerouslySetInnerHTML/);
+  assert.match(admin, /전 페이지 공지사항/);
+  assert.match(admin, /type="datetime-local"/);
+  assert.match(admin, /fromKstInput/);
+  assert.match(admin, /site-announcements:refresh/);
+  assert.match(admin, /revision: form\.revision \?\? undefined/);
+  assert.match(admin, /공지를 내리고 보관할까요/);
+  assert.match(publicRoute, /Cache-Control": "no-store"/);
+  assert.match(collectionRoute, /requireAdmin\(request, \{ mutating: true \}\)/);
+  assert.match(collectionRoute, /NOT EXISTS/);
+  assert.match(collectionRoute, /prepareAuditWrite/);
+  assert.match(itemRoute, /revision = revision \+ 1/);
+  assert.match(itemRoute, /deleted_at = \?/);
+  assert.match(model, /starts_at < \? AND ends_at > \?/);
+  assert.match(model, /starts_at <= \? AND ends_at > \?/);
+  assert.match(model, /crypto\.subtle\.digest\("SHA-256"/);
+  assert.match(schema, /siteAnnouncements = sqliteTable/);
+  assert.match(migration, /CREATE TABLE `site_announcements`/);
+  assert.match(migration, /site_announcements_period_check/);
+  assert.match(css, /--site-announcement-height/);
+  assert.match(css, /\.site-announcement-banner \{ position:sticky; top:0;/);
+  assert.match(smoke, /crossSiteCreate/);
+  assert.match(smoke, /missingOriginUpdate/);
+  assert.match(smoke, /stale/);
+  assert.match(smoke, /detailSha256/);
+  assert.match(smoke, /scheduledStartsAt/);
+  assert.match(smoke, /afterEnd/);
+});
+
+test("uses half-open scheduled notice windows and the nearest transition", () => {
+  const published = { status: "published", startsAt: 100, endsAt: 200, deletedAt: null };
+  assert.equal(announcementPhase(published, 99), "scheduled");
+  assert.equal(announcementPhase(published, 100), "active");
+  assert.equal(announcementPhase(published, 199), "active");
+  assert.equal(announcementPhase(published, 200), "expired");
+  assert.equal(announcementPhase({ ...published, status: "draft" }, 150), "draft");
+  assert.equal(announcementPhase({ ...published, deletedAt: 149 }, 150), "deleted");
+  assert.equal(nextAnnouncementTransition([{ endsAt: 200 }, { endsAt: 240 }], 180, 150), 180);
+  assert.equal(nextAnnouncementTransition([{ endsAt: 200 }], null, 150), 200);
+  assert.equal(nextAnnouncementTransition([], 150, 150), null);
 });

@@ -1,5 +1,6 @@
 import { adminErrorResponse, requireAdmin, synchronizeBlacklist, synchronizeServerEnforcements } from "@/lib/admin-security";
 import { adminOwnershipDashboard } from "@/lib/server-ownership";
+import { listSiteAnnouncements } from "@/lib/site-announcements";
 
 type ServerRow = {
   id: string; owner_email: string; title: string; address: string; port: number; status: string;
@@ -18,7 +19,7 @@ export async function GET(request: Request) {
     await synchronizeServerEnforcements(environment.DB);
     const ownership = await adminOwnershipDashboard(environment.DB);
     const now = Math.floor(Date.now() / 1000);
-    const [servers, blacklist, enforcements, conversations, audits, identities] = await Promise.all([
+    const [servers, blacklist, enforcements, conversations, audits, identities, announcements] = await Promise.all([
       environment.DB.prepare(`SELECT d.id, d.owner_email, d.title, d.address, d.port, d.status,
         d.votes_override, d.votes_adjustment, d.uptime_basis_points, d.uptime_adjustment_basis_points, d.premium_managed, d.premium_tier,
         d.premium_starts_at, d.premium_ends_at, d.premium_note, d.owner_verification_status, d.owner_verified_at,
@@ -48,6 +49,7 @@ export async function GET(request: Request) {
       environment.DB.prepare(`SELECT id, email, email_verified_at, last_login_at, identity_verification_status,
         identity_verified_at, identity_provider, identity_reference, created_at, updated_at
         FROM user_accounts ORDER BY updated_at DESC LIMIT 500`).all(),
+      listSiteAnnouncements(environment.DB),
     ]);
     const serverResults = servers.results.map((row) => {
       const baseVotes = Number(row.vote_count ?? 0);
@@ -93,6 +95,7 @@ export async function GET(request: Request) {
         details: parseDetails((entry as { details?: string }).details),
       })),
       identities: identities.results,
+      announcements,
       ownership,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

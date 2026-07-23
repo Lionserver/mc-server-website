@@ -1,4 +1,7 @@
 import type { Metadata } from "next";
+import { SiteAnnouncementBanner } from "@/components/site-announcement-banner";
+import { directoryEnv } from "@/lib/server-directory";
+import { publicAnnouncementState } from "@/lib/site-announcements";
 import "./globals.css";
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://minecraft.kr";
@@ -39,13 +42,26 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const initialAnnouncements = await initialSiteAnnouncements();
   return (
     <html lang="ko" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
       </head>
-      <body>{children}</body>
+      <body>
+        <SiteAnnouncementBanner initialPayload={initialAnnouncements} />
+        {children}
+      </body>
     </html>
   );
+}
+
+async function initialSiteAnnouncements() {
+  try {
+    const environment = await directoryEnv();
+    return await publicAnnouncementState(environment.DB);
+  } catch {
+    return { announcements: [], nextTransitionAt: null, serverTime: 0 };
+  }
 }

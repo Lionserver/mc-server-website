@@ -19,6 +19,7 @@
     "test:premium-auction": "node scripts/premium-auction-smoke.mjs",
     "test:ownership": "node scripts/ownership-auth-smoke.mjs",
     "test:broadcast-cache": "node scripts/broadcast-cache-smoke.mjs",
+    "test:announcements": "node scripts/site-announcements-smoke.mjs",
     "admin:credentials": "node scripts/admin-credentials.mjs",
     "db:generate": "drizzle-kit generate"
   },

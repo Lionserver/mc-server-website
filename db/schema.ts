@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const directoryServers = sqliteTable(
   "directory_servers",
@@ -367,6 +367,32 @@ export const adminAuditLogs = sqliteTable(
     createdAt: integer("created_at").notNull(),
   },
   (table) => [index("admin_audit_created_idx").on(table.createdAt)],
+);
+
+export const siteAnnouncements = sqliteTable(
+  "site_announcements",
+  {
+    id: text("id").primaryKey(),
+    title: text("title").notNull(),
+    summary: text("summary").notNull(),
+    detail: text("detail").notNull(),
+    publicationStatus: text("publication_status").notNull().default("draft"),
+    startsAt: integer("starts_at").notNull(),
+    endsAt: integer("ends_at").notNull(),
+    revision: integer("revision").notNull().default(1),
+    createdBy: text("created_by").notNull(),
+    updatedBy: text("updated_by").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+    deletedAt: integer("deleted_at"),
+    deletedBy: text("deleted_by"),
+  },
+  (table) => [
+    check("site_announcements_status_check", sql`${table.publicationStatus} in ('draft', 'published', 'archived')`),
+    check("site_announcements_period_check", sql`${table.endsAt} > ${table.startsAt}`),
+    index("site_announcements_window_idx").on(table.publicationStatus, table.deletedAt, table.startsAt, table.endsAt),
+    index("site_announcements_admin_idx").on(table.deletedAt, table.updatedAt, table.id),
+  ],
 );
 
 export const serverBlacklist = sqliteTable(

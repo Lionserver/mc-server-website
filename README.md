@@ -167,9 +167,9 @@ pnpm test:premium-auction
 
 ## 배포 전 운영 체크리스트
 
-1. `drizzle/0000`부터 `drizzle/0009`까지 운영 D1에 순서대로 적용합니다.
+1. `drizzle/0000`부터 `drizzle/0022`까지 운영 D1에 순서대로 적용합니다.
 2. 운영 R2 `MEDIA`, D1 `DB`, Durable Object `CHAT_ROOMS`·`DIRECTORY_LIVE` 바인딩을 연결합니다.
 3. `.dev.vars.example`의 인증·메일·관리자 OTP·브리지 비밀을 운영 비밀 저장소에 넣고 모든 로컬 미리보기 플래그를 끕니다.
 4. 외부 본인인증 제공자의 성공 결과를 총관리자 본인인증 심사 화면에 공급합니다. 인증되지 않은 계정은 프리미엄 입찰이 서버측에서 거절됩니다.
 5. `ALLOW_PRIVATE_BRIDGE_VERIFY=false`를 유지하고 실제 공개 DNS/MOTD에서 브리지·양도·서버 주장 인증을 점검합니다.
-6. `pnpm lint`, `pnpm exec tsc --noEmit`, `pnpm test`와 여섯 개 API/실시간 회귀 명령을 모두 실행한 뒤 배포합니다.
+6. `pnpm lint`, `pnpm exec tsc --noEmit`, `pnpm test`와 API/실시간 회귀 명령을 모두 실행한 뒤 배포합니다.

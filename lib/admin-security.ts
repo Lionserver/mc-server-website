@@ -1,6 +1,7 @@
 import { directoryEnv, ensureDirectorySchema, type DirectoryEnv } from "@/lib/server-directory";
 import { resolveMinecraftEndpoint } from "@/lib/minecraft-ping";
 import { temporaryAdminSession } from "@/lib/admin-temporary-access.mjs";
+import { ensureSiteAnnouncementSchema } from "@/lib/site-announcements";
 
 export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_EMAIL?: string;
@@ -32,6 +33,7 @@ export async function adminEnv(): Promise<AdminEnvironment> {
 
 export async function ensureAdminSchema(db: D1Database) {
   await ensureDirectorySchema(db);
+  await ensureSiteAnnouncementSchema(db);
   const columns = await db.prepare("PRAGMA table_info(directory_servers)").all<{ name: string }>();
   const existing = new Set(columns.results.map((column) => column.name));
   const additions: Array<[string, string]> = [
@@ -286,9 +288,32 @@ export async function logoutAdmin(request: Request) {
 }
 
 export async function writeAudit(db: D1Database, adminEmail: string, action: string, targetType: string, targetId: string, details: Record<string, unknown>) {
-  await db.prepare(`INSERT INTO admin_audit_logs (id, admin_email, action, target_type, target_id, details, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(crypto.randomUUID().replaceAll("-", ""), adminEmail.slice(0, 254), action.slice(0, 80), targetType.slice(0, 40), targetId.slice(0, 160), JSON.stringify(details).slice(0, 5000), unixNow()).run();
+  await prepareAuditWrite(db, adminEmail, action, targetType, targetId, details).run();
+}
+
+export function prepareAuditWrite(
+  db: D1Database,
+  adminEmail: string,
+  action: string,
+  targetType: string,
+  targetId: string,
+  details: Record<string, unknown>,
+  options?: { createdAt?: number; onlyIfPreviousStatementChanged?: boolean },
+) {
+  const sql = options?.onlyIfPreviousStatementChanged
+    ? `INSERT INTO admin_audit_logs (id, admin_email, action, target_type, target_id, details, created_at)
+      SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1`
+    : `INSERT INTO admin_audit_logs (id, admin_email, action, target_type, target_id, details, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`;
+  return db.prepare(sql).bind(
+    crypto.randomUUID().replaceAll("-", ""),
+    adminEmail.slice(0, 254),
+    action.slice(0, 80),
+    targetType.slice(0, 40),
+    targetId.slice(0, 160),
+    JSON.stringify(details).slice(0, 5000),
+    options?.createdAt ?? unixNow(),
+  );
 }
 
 export function normalizeBlacklistValue(kind: BlacklistKind, rawValue: unknown) {
