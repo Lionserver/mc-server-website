@@ -69,6 +69,7 @@ test("ships a measured small-community server directory", async () => {
   assert.match(directory, /averagePlayers7d: row\.recent_average == null \? null/);
   assert.match(directory, /AVG\(h\.players\).*recent_average/);
   assert.match(css, /\.small-directory-hero/);
+  assert.match(css, /\.small-directory-copy p \{ max-width:none;/);
   assert.match(css, /\.small-server-row/);
 });
 
