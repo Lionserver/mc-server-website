@@ -1,0 +1,2 @@
+DROP INDEX `directory_servers_address_idx`;--> statement-breakpoint
+CREATE UNIQUE INDEX `directory_servers_address_idx` ON `directory_servers` ("address" collate nocase,`port`) WHERE "directory_servers"."deleted_at" is null;

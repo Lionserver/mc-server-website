@@ -1,0 +1,1 @@
+CREATE INDEX `user_login_codes_ip_idx` ON `user_login_codes` (`request_ip_hash`,`created_at`);

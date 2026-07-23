@@ -1,0 +1,15 @@
+name: MinecraftKrBridge
+version: 1.0.1
+main: kr.minecraft.bridge.paper.MinecraftKrPaperBridge
+api-version: '1.21'
+folia-supported: true
+description: Signed Paper/Bukkit telemetry and ownership bridge for Minecraft.kr
+website: https://minecraft.kr
+commands:
+  mkrbridge:
+    description: Minecraft.kr bridge status and verification
+    permission: minecraftkr.bridge.admin
+    usage: /mkrbridge <status|send|verify>
+permissions:
+  minecraftkr.bridge.admin:
+    default: op
