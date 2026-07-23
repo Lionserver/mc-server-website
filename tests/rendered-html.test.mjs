@@ -1106,6 +1106,7 @@ test("ships scheduled global notices with secure admin lifecycle controls", asyn
   assert.match(banner, /ResizeObserver/);
   assert.match(banner, /requestSequenceRef/);
   assert.match(banner, /aria-pressed/);
+  assert.match(banner, /site-announcement-meta/);
   assert.match(banner, /site-announcement-detail/);
   assert.doesNotMatch(banner, /dangerouslySetInnerHTML/);
   assert.match(admin, /전 페이지 공지사항/);
@@ -1128,6 +1129,11 @@ test("ships scheduled global notices with secure admin lifecycle controls", asyn
   assert.match(migration, /site_announcements_period_check/);
   assert.match(css, /--site-announcement-height/);
   assert.match(css, /\.site-announcement-banner \{ position:sticky; top:0;/);
+  assert.match(css, /\.site-announcement-trigger \{[^}]*display:grid;[^}]*grid-template-columns:/);
+  assert.match(css, /@keyframes site-announcement-sheen/);
+  assert.match(css, /@keyframes site-announcement-icon-pulse/);
+  assert.match(css, /\*, \*:before, \*:after \{ animation-duration:\.01ms !important;/);
+  assert.match(css, /\.site-announcement-banner::before,\.site-announcement-label svg \{ animation:none !important; transform:none; \}/);
   assert.match(smoke, /crossSiteCreate/);
   assert.match(smoke, /missingOriginUpdate/);
   assert.match(smoke, /stale/);

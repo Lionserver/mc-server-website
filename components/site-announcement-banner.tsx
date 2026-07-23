@@ -149,11 +149,13 @@ export function SiteAnnouncementBanner({
         <button className="site-announcement-trigger" type="button" aria-label={`${lead.title} 공지 상세 열기`}>
           <span className="site-announcement-label"><Megaphone size={14} aria-hidden="true" /> 공지</span>
           <span className="site-announcement-copy"><b>{lead.title}</b><span>{lead.summary}</span></span>
-          {announcements.length > 1 && <span className="site-announcement-count">외 {announcements.length - 1}건</span>}
-          <time className="site-announcement-period" dateTime={new Date(lead.endsAt * 1000).toISOString()}>
-            {periodFormatter.format(lead.startsAt * 1000)} – {periodFormatter.format(lead.endsAt * 1000)} KST
-          </time>
-          <span className="site-announcement-cta">자세히 <ChevronRight size={14} aria-hidden="true" /></span>
+          <span className="site-announcement-meta">
+            {announcements.length > 1 && <span className="site-announcement-count">외 {announcements.length - 1}건</span>}
+            <time className="site-announcement-period" dateTime={new Date(lead.endsAt * 1000).toISOString()}>
+              {periodFormatter.format(lead.startsAt * 1000)} – {periodFormatter.format(lead.endsAt * 1000)} KST
+            </time>
+            <span className="site-announcement-cta">자세히 <ChevronRight size={14} aria-hidden="true" /></span>
+          </span>
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>
