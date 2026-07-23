@@ -12,7 +12,12 @@ export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_TEMP_BYPASS_UNTIL?: string;
 }
 
-export type AdminSession = { email: string; expiresAt: number; authMode: "session" | "temporary-bypass" };
+export type AdminSession = {
+  email: string;
+  expiresAt: number;
+  authMode: "session" | "temporary-bypass";
+  identitySource?: "sites-user-header" | "configured-actor";
+};
 export type BlacklistKind = "ip" | "address";
 export type ServerEnforcementKind = "warning" | "suspension" | "blind";
 

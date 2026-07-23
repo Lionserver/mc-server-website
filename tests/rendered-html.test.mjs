@@ -257,19 +257,25 @@ test("server-renders the protected administrator shell", async () => {
   assert.match(html, /총관리자 보안 세션 확인 중/);
 });
 
-test("limits temporary administrator access to the authenticated Sites user and one hour", async () => {
+test("limits temporary administrator bypass to a configured identity and one hour", async () => {
   const now = 1_800_000_000;
   const expiresAt = now + MAX_TEMPORARY_ADMIN_ACCESS_SECONDS;
   assert.deepEqual(
-    temporaryAdminSession("Owner@Example.com", "owner@example.com", String(expiresAt), now),
-    { email: "owner@example.com", expiresAt },
+    temporaryAdminSession(null, "Owner@Example.com", String(expiresAt), now),
+    { email: "owner@example.com", expiresAt, identitySource: "configured-actor" },
+  );
+  assert.deepEqual(
+    temporaryAdminSession("owner@example.com", "Owner@Example.com", String(expiresAt), now),
+    { email: "owner@example.com", expiresAt, identitySource: "sites-user-header" },
   );
   assert.equal(temporaryAdminSession("other@example.com", "owner@example.com", String(expiresAt), now), null);
-  assert.equal(temporaryAdminSession(null, "owner@example.com", String(expiresAt), now), null);
-  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", String(now), now), null);
-  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", String(expiresAt + 1), now), null);
-  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", ` ${expiresAt}`, now), null);
-  assert.equal(temporaryAdminSession("owner@example.com", "owner@example.com", "1.8000036e9", now), null);
+  assert.equal(temporaryAdminSession(null, null, String(expiresAt), now), null);
+  assert.equal(temporaryAdminSession(null, "not-an-email", String(expiresAt), now), null);
+  assert.equal(temporaryAdminSession(null, "owner@example.com", String(now), now), null);
+  assert.equal(temporaryAdminSession(null, "owner@example.com", String(expiresAt + 1), now), null);
+  assert.equal(temporaryAdminSession(null, "owner@example.com", ` ${expiresAt}`, now), null);
+  assert.equal(temporaryAdminSession(null, "owner@example.com", "1.8000036e9", now), null);
+  assert.equal(temporaryAdminSession(null, "owner@example.com", String(expiresAt), Number.NaN), null);
 
   const [security, sessionRoute, adminPage, envExample, devVarsExample] = await Promise.all([
     readFile(new URL("../lib/admin-security.ts", import.meta.url), "utf8"),
@@ -279,6 +285,7 @@ test("limits temporary administrator access to the authenticated Sites user and 
     readFile(new URL("../.dev.vars.example", import.meta.url), "utf8"),
   ]);
   assert.match(security, /oai-authenticated-user-email/);
+  assert.match(security, /temporaryAdminSession\(\s*request\.headers\.get\("oai-authenticated-user-email"\),\s*environment\.ADMIN_TEMP_BYPASS_EMAIL/);
   assert.match(security, /if \(options\?\.mutating\) assertSameOrigin\(request\)/);
   assert.match(security, /temporary: true/);
   assert.match(security, /temporaryBypassOptOutCookie/);
@@ -286,6 +293,7 @@ test("limits temporary administrator access to the authenticated Sites user and 
   assert.match(sessionRoute, /authMode: session\.authMode/);
   assert.match(sessionRoute, /"Cache-Control": "no-store"/);
   assert.match(sessionRoute, /admin\.temporary_access\.started/);
+  assert.match(sessionRoute, /identitySource: session\.identitySource/);
   assert.match(adminPage, /임시 접근/);
   assert.match(adminPage, /overview\.admin\.expiresAt \* 1000 - Date\.now\(\)/);
   assert.match(adminPage, /setAuthenticated\(false\);[\s\S]*setOverview\(null\)/);

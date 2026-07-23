@@ -11,6 +11,7 @@ export async function GET(request: Request) {
         await writeAudit(environment.DB, session.email, "admin.temporary_access.started", "session", auditTarget, {
           expiresAt: session.expiresAt,
           authMode: session.authMode,
+          identitySource: session.identitySource ?? "configured-actor",
         });
       }
     }

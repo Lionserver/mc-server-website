@@ -8,6 +8,7 @@ ADMIN_EMAIL="admin@example.com"
 ADMIN_PASSWORD_HASH=""
 ADMIN_TOTP_SECRET=""
 ADMIN_LOCAL_PREVIEW="true"
+# Only enable behind a private outer access policy; the code enforces a one-hour maximum.
 ADMIN_TEMP_BYPASS_EMAIL=""
 ADMIN_TEMP_BYPASS_UNTIL=""
 
