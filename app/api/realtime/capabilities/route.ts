@@ -11,7 +11,7 @@ export async function GET() {
     fallback: "polling",
   }, {
     headers: {
-      "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
+      "Cache-Control": "no-store",
     },
   });
 }

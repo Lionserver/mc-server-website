@@ -995,7 +995,7 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
 test("keeps launch UI resilient across narrow layouts, focus flows and optional realtime", async () => {
   const [
     home, broadcasts, header, registration, cropEditor, descriptionEditor,
-    admin, login, operator, timedMotion, css,
+    admin, login, operator, timedMotion, capabilities, css,
   ] = await Promise.all([
     readHomeSource(),
     readFile(new URL("../app/broadcasts/page.tsx", import.meta.url), "utf8"),
@@ -1007,6 +1007,7 @@ test("keeps launch UI resilient across narrow layouts, focus flows and optional 
     readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/use-timed-motion.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/realtime/capabilities/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
@@ -1016,6 +1017,7 @@ test("keeps launch UI resilient across narrow layouts, focus flows and optional 
   assert.match(header, /requestAnimationFrame\(\(\) => mobileButtonRef\.current\?\.focus\(\)\)/);
   assert.match(home, /fetch\("\/api\/realtime\/capabilities", \{ cache: "no-store" \}\)/);
   assert.match(home, /if \(!response\.ok \|\| !capabilities\.directory\)/);
+  assert.match(capabilities, /Cache-Control": "no-store"/);
   assert.match(home, /DirectoryLoadError/);
   assert.match(home, /role="alert"/);
   assert.match(home, /onCloseAutoFocus/);
