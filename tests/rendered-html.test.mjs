@@ -6,6 +6,7 @@ import { MAX_TEMPORARY_ADMIN_ACCESS_SECONDS, temporaryAdminSession } from "../li
 import { resolveThemePreference, safeInternalReturnTo } from "../lib/browser-preferences.mjs";
 import { isPrivateHostName, isPrivateOrReservedIp, networkFingerprintAddress, normalizeIpAddress } from "../lib/ip-security.mjs";
 import { announcementPhase, nextAnnouncementTransition } from "../lib/site-announcement-lifecycle.mjs";
+import { isPbkdf2PasswordHash, isTotpSecret, verifyPbkdf2Password, verifyTotpCode } from "../lib/admin-credentials.mjs";
 
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -27,6 +28,20 @@ async function render(pathname = "/") {
     },
   );
 }
+
+test("production administrator credential primitives reject malformed values and verify valid credentials", async () => {
+  const passwordHash = "pbkdf2$100000$MDEyMzQ1Njc4OWFiY2RlZg$XM4ByEIgwTj7DZ_FCwdEIrWQJ0zaMek-mE4euvzD3wk";
+  assert.equal(isPbkdf2PasswordHash(passwordHash), true);
+  assert.equal(isPbkdf2PasswordHash(`"${passwordHash}"`), false);
+  assert.equal(await verifyPbkdf2Password("minecraft-admin-test", passwordHash), true);
+  assert.equal(await verifyPbkdf2Password("incorrect-password", passwordHash), false);
+
+  const rfcSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+  assert.equal(isTotpSecret(rfcSecret), true);
+  assert.equal(isTotpSecret(`"${rfcSecret}"`), false);
+  assert.equal(await verifyTotpCode("287082", rfcSecret, 59_000), true);
+  assert.equal(await verifyTotpCode("000000", rfcSecret, 59_000), false);
+});
 
 test("server-renders the Minecraft.kr product shell", async () => {
   const [pageSource, headerSource] = await Promise.all([
@@ -752,7 +767,12 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(adminPage, /useChatRealtime/);
   assert.match(adminSecurity, /SameSite=Strict/);
   assert.match(adminSecurity, /MAX_LOGIN_FAILURES = 5/);
-  assert.match(adminSecurity, /verifyTotp/);
+  assert.match(adminSecurity, /MAX_LOGIN_FAILURES_PER_IP = 20/);
+  assert.match(adminSecurity, /verifyTotpCode/);
+  assert.match(adminSecurity, /ADMIN_CREDENTIALS_ROTATED_AT/);
+  assert.match(adminSecurity, /attempt\.updated_at < credentialsRotatedAt/);
+  assert.match(adminSecurity, /row\.created_at < credentialsRotatedAt/);
+  assert.match(adminSecurity, /credentialRotationConfigured/);
   assert.match(schema, /admin_sessions/);
   assert.match(schema, /server_blacklist/);
   assert.match(schema, /admin_messages/);

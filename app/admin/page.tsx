@@ -193,7 +193,7 @@ function AdminFrame({ children }: { children: React.ReactNode }) {
 }
 
 function AdminLogin({ onSuccess }: { onSuccess: () => Promise<void> }) {
-  const [email, setEmail] = useState("admin@minecraft.kr");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
@@ -211,7 +211,7 @@ function AdminLogin({ onSuccess }: { onSuccess: () => Promise<void> }) {
   return <AdminFrame><section className="admin-login-card">
     <div className="admin-login-mark"><ShieldCheck /></div><span className="admin-eyebrow">RESTRICTED ACCESS</span><h1>총관리자 인증</h1><p>비밀번호와 OTP 앱의 6자리 코드를 함께 입력하세요.</p>
     <form onSubmit={submit} className="admin-login-form">
-      <label>관리자 이메일<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label>
+      <label>관리자 이메일<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" placeholder="name@example.com" required /></label>
       <label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>
       <label>OTP 6자리<input inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))} autoComplete="one-time-code" required /></label>
       {error && <div className="admin-form-error" role="alert">{error}</div>}<button className="admin-primary" disabled={busy}>{busy ? "인증 중…" : "보안 로그인"}</button>

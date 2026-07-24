@@ -3,11 +3,18 @@ import { resolveMinecraftEndpoint } from "@/lib/minecraft-ping";
 import { ensureSiteAnnouncementSchema } from "@/lib/site-announcements";
 import { ensureBridgeSchema } from "@/lib/bridge-api";
 import { normalizeIpAddress } from "@/lib/ip-security.mjs";
+import {
+  isPbkdf2PasswordHash,
+  isTotpSecret,
+  verifyPbkdf2Password,
+  verifyTotpCode,
+} from "@/lib/admin-credentials.mjs";
 
 export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_EMAIL?: string;
   ADMIN_PASSWORD_HASH?: string;
   ADMIN_TOTP_SECRET?: string;
+  ADMIN_CREDENTIALS_ROTATED_AT?: string;
   ADMIN_LOCAL_PREVIEW?: string;
   ADMIN_LOCAL_PASSWORD?: string;
 }
@@ -23,6 +30,7 @@ export type ServerEnforcementKind = "warning" | "suspension" | "blind";
 const ADMIN_COOKIE = "mkr_admin_session";
 const SESSION_SECONDS = 8 * 60 * 60;
 const MAX_LOGIN_FAILURES = 5;
+const MAX_LOGIN_FAILURES_PER_IP = 20;
 const LOGIN_BLOCK_SECONDS = 15 * 60;
 
 export async function adminEnv(): Promise<AdminEnvironment> {
@@ -196,27 +204,51 @@ export async function loginAdmin(request: Request, payload: unknown) {
 
   const environment = await adminEnv();
   await ensureAdminSchema(environment.DB);
-  const fingerprint = await loginFingerprint(request, email);
-  const attempt = await environment.DB.prepare("SELECT failure_count, blocked_until FROM admin_login_attempts WHERE fingerprint = ?")
-    .bind(fingerprint).first<{ failure_count: number; blocked_until: number }>();
+  const { credential: fingerprint, source: sourceFingerprint } = await loginFingerprints(request, email);
+  let [attempt, sourceAttempt] = await Promise.all([
+    loginAttempt(environment.DB, fingerprint),
+    loginAttempt(environment.DB, sourceFingerprint),
+  ]);
   const now = unixNow();
-  if (attempt && attempt.blocked_until > now) {
+  const credentialsRotatedAt = parseUnixTimestamp(environment.ADMIN_CREDENTIALS_ROTATED_AT);
+  const staleFingerprints = [
+    attempt && credentialsRotatedAt > 0 && attempt.updated_at < credentialsRotatedAt ? fingerprint : null,
+    sourceAttempt && credentialsRotatedAt > 0 && sourceAttempt.updated_at < credentialsRotatedAt ? sourceFingerprint : null,
+  ].filter((value): value is string => Boolean(value));
+  if (staleFingerprints.length > 0) {
+    await environment.DB.batch(staleFingerprints.map((value) => environment.DB.prepare("DELETE FROM admin_login_attempts WHERE fingerprint = ?").bind(value)));
+    if (staleFingerprints.includes(fingerprint)) attempt = null;
+    if (staleFingerprints.includes(sourceFingerprint)) sourceAttempt = null;
+  }
+  if ((attempt && attempt.blocked_until > now) || (sourceAttempt && sourceAttempt.blocked_until > now)) {
     throw Response.json({ error: "로그인 시도가 잠겼습니다. 15분 후 다시 시도해 주세요." }, { status: 429 });
   }
 
   const localPreview = isLocalPreview(request, environment);
-  const configuredEmail = (localPreview ? "admin@minecraft.kr" : environment.ADMIN_EMAIL ?? "").trim().toLowerCase();
+  const configuredEmail = configuredAdminEmail(request, environment);
+  const credentialsConfigured = localPreview || (
+    isPbkdf2PasswordHash(environment.ADMIN_PASSWORD_HASH)
+    && isTotpSecret(environment.ADMIN_TOTP_SECRET)
+  );
+  if (!configuredEmail || !credentialsConfigured) {
+    throw Response.json({ error: "총관리자 인증 환경값이 올바르게 설정되지 않았습니다." }, { status: 503 });
+  }
   const validEmail = configuredEmail.length > 0 && await constantTimeEqualText(email, configuredEmail);
   const validPassword = localPreview
     ? await constantTimeEqualText(password, environment.ADMIN_LOCAL_PASSWORD ?? "")
-    : await verifyPasswordHash(password, environment.ADMIN_PASSWORD_HASH ?? "");
-  const validOtp = localPreview ? otp === "000000" : await verifyTotp(otp, environment.ADMIN_TOTP_SECRET ?? "");
+    : await verifyPbkdf2Password(password, environment.ADMIN_PASSWORD_HASH ?? "");
+  const validOtp = localPreview ? otp === "000000" : await verifyTotpCode(otp, environment.ADMIN_TOTP_SECRET ?? "");
 
-  if (!configuredEmail || (!localPreview && (!environment.ADMIN_PASSWORD_HASH || !environment.ADMIN_TOTP_SECRET))) {
-    throw Response.json({ error: "총관리자 인증 환경값이 설정되지 않았습니다." }, { status: 503 });
-  }
   if (!validEmail || !validPassword || !validOtp) {
-    const failure = await environment.DB.prepare(`INSERT INTO admin_login_attempts
+    console.warn("admin login rejected", {
+      emailMatches: validEmail,
+      passwordMatches: validPassword,
+      otpMatches: validOtp,
+      localPreview,
+      credentialRotationConfigured: credentialsRotatedAt > 0,
+    });
+    const failures = await environment.DB.batch<{ failure_count: number; blocked_until: number }>([
+      environment.DB.prepare(`INSERT INTO admin_login_attempts
       (fingerprint, failure_count, blocked_until, updated_at)
       VALUES (?, 1, 0, ?)
       ON CONFLICT(fingerprint) DO UPDATE SET
@@ -228,19 +260,41 @@ export async function loginAdmin(request: Request, payload: unknown) {
         END,
         updated_at = excluded.updated_at
       RETURNING failure_count, blocked_until`)
-      .bind(fingerprint, now, MAX_LOGIN_FAILURES, now + LOGIN_BLOCK_SECONDS)
-      .first<{ failure_count: number; blocked_until: number }>();
-    if (!failure) throw Response.json({ error: "로그인 제한 상태를 확인하지 못했습니다." }, { status: 503 });
+      .bind(fingerprint, now, MAX_LOGIN_FAILURES, now + LOGIN_BLOCK_SECONDS),
+      environment.DB.prepare(`INSERT INTO admin_login_attempts
+      (fingerprint, failure_count, blocked_until, updated_at)
+      VALUES (?, 1, 0, ?)
+      ON CONFLICT(fingerprint) DO UPDATE SET
+        failure_count = admin_login_attempts.failure_count + 1,
+        blocked_until = CASE
+          WHEN admin_login_attempts.failure_count + 1 >= ?
+            THEN MAX(admin_login_attempts.blocked_until, ?)
+          ELSE admin_login_attempts.blocked_until
+        END,
+        updated_at = excluded.updated_at
+      RETURNING failure_count, blocked_until`)
+      .bind(sourceFingerprint, now, MAX_LOGIN_FAILURES_PER_IP, now + LOGIN_BLOCK_SECONDS),
+    ]);
+    const failure = failures[0]?.results[0];
+    const sourceFailure = failures[1]?.results[0];
+    if (!failure || !sourceFailure) throw Response.json({ error: "로그인 제한 상태를 확인하지 못했습니다." }, { status: 503 });
     const failureCount = failure.failure_count;
-    await writeAudit(environment.DB, email || "unknown", "admin.login.failed", "session", fingerprint.slice(0, 12), { failureCount });
+    const blocked = failure.blocked_until > now || sourceFailure.blocked_until > now;
+    await writeAudit(environment.DB, email || "unknown", "admin.login.failed", "session", fingerprint.slice(0, 12), {
+      failureCount,
+      sourceFailureCount: sourceFailure.failure_count,
+    });
     throw Response.json({
-      error: failure.blocked_until > now
+      error: blocked
         ? "로그인 시도가 잠겼습니다. 15분 후 다시 시도해 주세요."
         : "관리자 인증 정보가 일치하지 않습니다.",
-    }, { status: failure.blocked_until > now ? 429 : 401 });
+    }, { status: blocked ? 429 : 401 });
   }
 
-  await environment.DB.prepare("DELETE FROM admin_login_attempts WHERE fingerprint = ?").bind(fingerprint).run();
+  await environment.DB.batch([
+    environment.DB.prepare("DELETE FROM admin_login_attempts WHERE fingerprint = ?").bind(fingerprint),
+    environment.DB.prepare("DELETE FROM admin_login_attempts WHERE fingerprint = ?").bind(sourceFingerprint),
+  ]);
   const token = randomToken(32);
   const tokenHash = await sha256Hex(token);
   const expiresAt = now + SESSION_SECONDS;
@@ -258,9 +312,16 @@ export async function requireAdmin(request: Request, options?: { mutating?: bool
   const token = cookieValue(request.headers.get("cookie") ?? "", ADMIN_COOKIE);
   if (token && token.length >= 32) {
     const tokenHash = await sha256Hex(token);
-    const row = await environment.DB.prepare("SELECT admin_email, expires_at, last_seen_at FROM admin_sessions WHERE token_hash = ? AND expires_at > ?")
-      .bind(tokenHash, now).first<{ admin_email: string; expires_at: number; last_seen_at: number }>();
+    const row = await environment.DB.prepare("SELECT admin_email, created_at, expires_at, last_seen_at FROM admin_sessions WHERE token_hash = ? AND expires_at > ?")
+      .bind(tokenHash, now).first<{ admin_email: string; created_at: number; expires_at: number; last_seen_at: number }>();
     if (row) {
+      const configuredEmail = configuredAdminEmail(request, environment);
+      const credentialsRotatedAt = parseUnixTimestamp(environment.ADMIN_CREDENTIALS_ROTATED_AT);
+      const emailMatches = configuredEmail.length > 0 && await constantTimeEqualText(row.admin_email, configuredEmail);
+      if (!emailMatches || (credentialsRotatedAt > 0 && row.created_at < credentialsRotatedAt)) {
+        await environment.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
+        throw Response.json({ error: "관리자 자격증명이 변경되었습니다. 다시 로그인해 주세요." }, { status: 401 });
+      }
       if (now - row.last_seen_at > 300) {
         await environment.DB.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
       }
@@ -448,55 +509,14 @@ function isLocalPreview(request: Request, environment: AdminEnvironment) {
   return environment.ADMIN_LOCAL_PREVIEW === "true" && (hostname === "localhost" || hostname === "127.0.0.1");
 }
 
-async function verifyPasswordHash(password: string, stored: string) {
-  const parts = stored.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
-  const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 100_000 || iterations > 2_000_000) return false;
-  try {
-    const salt = base64UrlBytes(parts[2]);
-    const expected = base64UrlBytes(parts[3]);
-    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-    const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, expected.length * 8));
-    return constantTimeEqualBytes(derived, expected);
-  } catch {
-    return false;
-  }
+function configuredAdminEmail(request: Request, environment: AdminEnvironment) {
+  return (isLocalPreview(request, environment) ? "admin@minecraft.kr" : environment.ADMIN_EMAIL ?? "").trim().toLowerCase();
 }
 
-async function verifyTotp(code: string, secret: string) {
-  let secretBytes: Uint8Array;
-  try { secretBytes = decodeBase32(secret); } catch { return false; }
-  if (secretBytes.length < 10) return false;
-  const counter = Math.floor(Date.now() / 1000 / 30);
-  for (const offset of [-1, 0, 1]) {
-    const buffer = new ArrayBuffer(8);
-    const view = new DataView(buffer);
-    const value = counter + offset;
-    view.setUint32(0, Math.floor(value / 2 ** 32));
-    view.setUint32(4, value >>> 0);
-    const key = await crypto.subtle.importKey("raw", secretBytes.slice().buffer as ArrayBuffer, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
-    const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, buffer));
-    const index = signature[signature.length - 1] & 0x0f;
-    const binary = ((signature[index] & 0x7f) << 24) | (signature[index + 1] << 16) | (signature[index + 2] << 8) | signature[index + 3];
-    const expected = String(binary % 1_000_000).padStart(6, "0");
-    if (await constantTimeEqualText(code, expected)) return true;
-  }
-  return false;
-}
-
-function decodeBase32(value: string) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const normalized = value.toUpperCase().replace(/[^A-Z2-7]/g, "");
-  let bits = "";
-  for (const character of normalized) {
-    const index = alphabet.indexOf(character);
-    if (index < 0) throw new Error("invalid base32");
-    bits += index.toString(2).padStart(5, "0");
-  }
-  const bytes = new Uint8Array(Math.floor(bits.length / 8));
-  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(bits.slice(index * 8, index * 8 + 8), 2);
-  return bytes;
+function parseUnixTimestamp(value: string | undefined) {
+  if (!value || !/^\d{10}$/.test(value)) return 0;
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) ? timestamp : 0;
 }
 
 function isIpAddress(value: string) {
@@ -521,9 +541,20 @@ function cookieValue(header: string, name: string) {
   return null;
 }
 
-async function loginFingerprint(request: Request, email: string) {
+async function loginFingerprints(request: Request, email: string) {
   const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0] ?? "local";
-  return sha256Hex(`${ip.trim()}|${email.slice(0, 254)}`);
+  const source = ip.trim();
+  const [credential, sourceFingerprint] = await Promise.all([
+    sha256Hex(`${source}|${email.slice(0, 254)}`),
+    sha256Hex(`source|${source}`),
+  ]);
+  return { credential, source: sourceFingerprint };
+}
+
+async function loginAttempt(db: D1Database, fingerprint: string) {
+  return db.prepare("SELECT failure_count, blocked_until, updated_at FROM admin_login_attempts WHERE fingerprint = ?")
+    .bind(fingerprint)
+    .first<{ failure_count: number; blocked_until: number; updated_at: number }>();
 }
 
 async function sha256Hex(value: string) {
@@ -541,12 +572,6 @@ function constantTimeEqualBytes(left: Uint8Array, right: Uint8Array) {
   let mismatch = 0;
   for (let index = 0; index < left.length; index += 1) mismatch |= left[index] ^ right[index];
   return mismatch === 0;
-}
-
-function base64UrlBytes(value: string) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const decoded = atob(normalized);
-  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
 }
 
 function randomToken(length: number) {

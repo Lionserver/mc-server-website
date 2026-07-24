@@ -18,6 +18,7 @@
 - Sites 사용자 로그인: `SITES_AUTH_ENABLED=true`
 - 이메일 대체 로그인: `AUTH_CODE_SECRET`, `RESEND_API_KEY`, `AUTH_EMAIL_FROM`
 - 총관리자: `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `ADMIN_TOTP_SECRET`
+- 총관리자 자격증명 교체 시각: `ADMIN_CREDENTIALS_ROTATED_AT` (Unix 초). 이 시각보다 오래된 로그인 실패 잠금과 관리자 세션은 자동으로 무효화된다.
 - Bridge: `BRIDGE_ADMIN_TOKEN`, `BRIDGE_MASTER_SECRET`
 - 추천 개인정보 보호: `VOTE_IP_HASH_SECRET`
 - 공개 기준 주소: `NEXT_PUBLIC_SITE_URL`
