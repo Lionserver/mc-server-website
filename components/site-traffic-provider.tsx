@@ -72,9 +72,11 @@ export function SiteTrafficProvider({ children }: { children: React.ReactNode })
     void record();
     scheduleNextDay();
     document.addEventListener("visibilitychange", recordWhenVisible);
+    window.addEventListener("online", recordWhenVisible);
     return () => {
       if (dayTimer !== null) window.clearTimeout(dayTimer);
       document.removeEventListener("visibilitychange", recordWhenVisible);
+      window.removeEventListener("online", recordWhenVisible);
     };
   }, [pathname]);
 

@@ -84,11 +84,13 @@ export function SiteAnnouncementBanner({
     const refresh = () => void load();
     const visible = () => { if (document.visibilityState === "visible") void load(); };
     window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
     window.addEventListener("site-announcements:refresh", refresh);
     document.addEventListener("visibilitychange", visible);
     return () => {
       if (initial != null) window.clearTimeout(initial);
       window.removeEventListener("focus", refresh);
+      window.removeEventListener("online", refresh);
       window.removeEventListener("site-announcements:refresh", refresh);
       document.removeEventListener("visibilitychange", visible);
     };
