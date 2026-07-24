@@ -62,7 +62,7 @@ try {
 
   const publicActive = await fetch(`${baseUrl}/api/announcements`, { cache: "no-store" });
   assert.equal(publicActive.status, 200);
-  assert.equal(publicActive.headers.get("cache-control"), "no-store");
+  assert.match(publicActive.headers.get("cache-control") ?? "", /s-maxage=15/);
   const publicActiveBody = await publicActive.json();
   const visible = publicActiveBody.announcements.find((entry) => entry.id === announcementId);
   assert.equal(visible.detail, detail);

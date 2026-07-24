@@ -1,3 +1,5 @@
+import { trafficRetentionBoundary } from "@/lib/site-traffic";
+
 const DAY_SECONDS = 86_400;
 
 export async function cleanupExpiredApplicationData(db: D1Database, now = Math.floor(Date.now() / 1000)) {
@@ -25,6 +27,8 @@ export async function cleanupExpiredApplicationData(db: D1Database, now = Math.f
     db.prepare("DELETE FROM server_status_history WHERE bucket_at < ?").bind(now - 35 * DAY_SECONDS),
     db.prepare("DELETE FROM bridge_telemetry_history WHERE bucket_at < ?").bind(now - 35 * DAY_SECONDS),
     db.prepare("DELETE FROM security_rate_limits WHERE updated_at < ?").bind(now - 7 * DAY_SECONDS),
+    db.prepare("DELETE FROM site_daily_visitors WHERE first_seen_at < ?").bind(trafficRetentionBoundary(now)),
+    db.prepare("DELETE FROM site_daily_visitor_totals WHERE updated_at < ?").bind(trafficRetentionBoundary(now)),
   ]);
   return {
     skipped: false,

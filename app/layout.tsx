@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { SiteAnnouncementBanner } from "@/components/site-announcement-banner";
+import { SiteTrafficProvider } from "@/components/site-traffic-provider";
 import { directoryEnv } from "@/lib/server-directory";
 import { publicAnnouncementState } from "@/lib/site-announcements";
 import { requestSiteOrigin } from "@/lib/site-url";
@@ -136,7 +137,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
       </head>
       <body>
         <SiteAnnouncementBanner initialPayload={initialAnnouncements} />
-        {children}
+        <SiteTrafficProvider>{children}</SiteTrafficProvider>
       </body>
     </html>
   );

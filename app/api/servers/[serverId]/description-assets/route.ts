@@ -24,7 +24,7 @@ export async function GET(request: Request, context: RouteContext) {
     return Response.json({ assets: assets.results.map((asset) => ({
       id: asset.id, contentType: asset.content_type, width: asset.width, height: asset.height, size: asset.size,
       createdAt: asset.created_at, url: `/api/servers/${serverId}/description-assets/${asset.id}`,
-    })) });
+    })) }, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie, OAI-Authenticated-User-Email" } });
   } catch (error) {
     return directoryErrorResponse(error);
   }

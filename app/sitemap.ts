@@ -6,17 +6,14 @@ export const revalidate = 3_600;
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const origin = configuredSiteOrigin();
-  const now = new Date();
   const staticRoutes: MetadataRoute.Sitemap = [
     {
       url: `${origin}/`,
-      lastModified: now,
       changeFrequency: "hourly",
       priority: 1,
     },
     {
       url: `${origin}/broadcasts`,
-      lastModified: now,
       changeFrequency: "hourly",
       priority: 0.7,
     },
@@ -33,7 +30,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   ];
 
   try {
-    const servers = await indexablePublicServerUrls();
+    const servers = await indexablePublicServerUrls(49_996);
     return [
       ...staticRoutes,
       ...servers.map((server) => ({

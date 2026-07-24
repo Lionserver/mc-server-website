@@ -8,6 +8,16 @@ export const metadata: Metadata = {
   alternates: {
     canonical: "/terms",
   },
+  openGraph: {
+    title: "이용약관 — Minecraft.kr",
+    description: "Minecraft.kr 서버 디렉터리 이용약관",
+    url: "/terms",
+  },
+  twitter: {
+    card: "summary",
+    title: "이용약관 — Minecraft.kr",
+    description: "Minecraft.kr 서버 디렉터리 이용약관",
+  },
 };
 
 export default function TermsPage() {

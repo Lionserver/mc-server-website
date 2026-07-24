@@ -118,6 +118,25 @@ export const securityRateLimits = sqliteTable(
   ],
 );
 
+export const siteDailyVisitors = sqliteTable(
+  "site_daily_visitors",
+  {
+    visitDay: text("visit_day").notNull(),
+    visitorHash: text("visitor_hash").notNull(),
+    firstSeenAt: integer("first_seen_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.visitDay, table.visitorHash] }),
+    index("site_daily_visitors_seen_idx").on(table.firstSeenAt),
+  ],
+);
+
+export const siteDailyVisitorTotals = sqliteTable("site_daily_visitor_totals", {
+  visitDay: text("visit_day").primaryKey(),
+  visitorCount: integer("visitor_count").notNull().default(0),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 export const serverOwnershipTransfers = sqliteTable(
   "server_ownership_transfers",
   {

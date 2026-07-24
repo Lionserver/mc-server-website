@@ -169,6 +169,20 @@
       "when": 1784853604521,
       "tag": "0023_wide_bulldozer",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1784858974671,
+      "tag": "0024_slow_swarm",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1784859892701,
+      "tag": "0025_sour_zzzax",
+      "breakpoints": true
     }
   ]
 }

@@ -14,6 +14,7 @@ type ReadinessEnvironment = {
   BRIDGE_ADMIN_TOKEN?: string;
   BRIDGE_MASTER_SECRET?: string;
   VOTE_IP_HASH_SECRET?: string;
+  SITE_TRAFFIC_HASH_SECRET?: string;
   CHAT_ROOMS?: DurableObjectNamespace;
   DIRECTORY_LIVE?: DurableObjectNamespace;
 };
@@ -39,6 +40,7 @@ export async function GET() {
       && isAdminPasswordHash(environment.ADMIN_PASSWORD_HASH)
       && isTotpSecret(environment.ADMIN_TOTP_SECRET),
     votePrivacySecret: hasMinimumLength(environment.VOTE_IP_HASH_SECRET, 32),
+    siteTrafficPrivacySecret: hasMinimumLength(environment.SITE_TRAFFIC_HASH_SECRET, 32),
     bridge: hasMinimumLength(environment.BRIDGE_ADMIN_TOKEN, 24)
       && hasMinimumLength(environment.BRIDGE_MASTER_SECRET, 32),
     directoryRealtime: Boolean(environment.DIRECTORY_LIVE),
@@ -50,6 +52,7 @@ export async function GET() {
     && ownerAuthentication
     && checks.permanentAdminAuth
     && checks.votePrivacySecret
+    && checks.siteTrafficPrivacySecret
     && checks.bridge;
 
   return Response.json({

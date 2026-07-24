@@ -99,10 +99,13 @@ export function SiteAnnouncementBanner({
       ? payload.serverTime * 1000 + (Date.now() - payloadReceivedAtRef.current)
       : Date.now();
     const boundaryDelay = payload.nextTransitionAt == null
-      ? 30_000
+      ? 60_000
       : payload.nextTransitionAt * 1000 - serverNowMs + 250;
-    const delay = boundaryDelay <= 0 ? 5_000 : Math.max(250, Math.min(30_000, boundaryDelay));
+    const delay = boundaryDelay <= 0
+      ? 5_000
+      : Math.max(250, Math.min(60_000, boundaryDelay));
     const timer = window.setTimeout(() => {
+      if (document.visibilityState !== "visible") return;
       const estimatedServerNow = payload.serverTime > 0
         ? Math.floor((payload.serverTime * 1000 + Date.now() - payloadReceivedAtRef.current) / 1000)
         : Math.floor(Date.now() / 1000);
@@ -146,7 +149,7 @@ export function SiteAnnouncementBanner({
   const selectedTabId = `site-announcement-tab-${selectedIndex}`;
   const detailPanelId = "site-announcement-detail-panel";
 
-  return <aside ref={bannerRef} className="site-announcement-banner" aria-label="서비스 공지" aria-live="polite">
+  return <aside ref={bannerRef} className="site-announcement-banner" aria-label="서비스 공지" aria-live="polite" data-nosnippet>
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Trigger asChild>
         <button className="site-announcement-trigger" type="button" aria-label={`${lead.title} 공지 상세 열기`}>

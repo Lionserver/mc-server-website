@@ -1,6 +1,7 @@
 import { adminErrorResponse, prepareAuditWrite, requireAdmin } from "@/lib/admin-security";
 import {
   announcementAuditSummary,
+  invalidatePublicAnnouncementState,
   listSiteAnnouncements,
   parseSiteAnnouncementInput,
 } from "@/lib/site-announcements";
@@ -57,6 +58,7 @@ export async function POST(request: Request) {
     if ((insert.meta.changes ?? 0) !== 1) {
       return Response.json({ error: "같은 기간에 게시되는 공지가 이미 있습니다. 기간을 조정해 주세요." }, { status: 409 });
     }
+    invalidatePublicAnnouncementState(environment.DB);
     return Response.json({ announcement }, {
       status: 201,
       headers: { "Cache-Control": "no-store" },

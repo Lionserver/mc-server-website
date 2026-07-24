@@ -36,7 +36,9 @@ export async function GET(request: Request, context: RouteContext) {
       return server ? Response.json({ server }, { headers: { "Cache-Control": "no-store" } }) : Response.json({ error: "not found" }, { status: 404 });
     }
     const staff = await staffProfilesByServer(environment.DB, [id]);
-    return Response.json({ server: serializeDirectoryServer(row, staff.get(id) ?? []) });
+    return Response.json({ server: serializeDirectoryServer(row, staff.get(id) ?? []) }, {
+      headers: { "Cache-Control": "private, no-store", Vary: "Cookie, OAI-Authenticated-User-Email" },
+    });
   } catch (error) {
     return directoryErrorResponse(error);
   }

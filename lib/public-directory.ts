@@ -292,7 +292,7 @@ export async function publicServerList(request: Request) {
   const count = await environment.DB.prepare("SELECT COUNT(*) count FROM directory_servers WHERE status = 'active' AND deleted_at IS NULL")
     .first<{ count: number }>();
   return {
-    servers: rows.results.map((row) => serializePublicRow(row, now)),
+    servers: rows.results.map((row) => serializePublicRow(row, now, false)),
     page,
     pageSize: limit,
     total: Number(count?.count ?? 0),
@@ -427,7 +427,7 @@ function publicSelectSql() {
     FROM directory_servers d LEFT JOIN bridge_servers b ON b.server_id = d.bridge_server_id`;
 }
 
-function serializePublicRow(row: PublicRow, now: number): PublicServer {
+function serializePublicRow(row: PublicRow, now: number, includeDescription = true): PublicServer {
   const bridgeOnline = Boolean(row.bridge_verified_at && row.last_seen_at && row.last_seen_at >= now - 120);
   const pingOnline = Boolean(row.bridge_verified_at && row.last_ping_success_at && row.last_ping_success_at >= now - 120);
   const online = bridgeOnline || pingOnline;
@@ -467,8 +467,10 @@ function serializePublicRow(row: PublicRow, now: number): PublicServer {
     edition: row.edition as PublicServer["edition"],
     version,
     summary: row.short_description,
-    description: row.description,
-    descriptionDocument: readDescriptionDocument(row.description_document, row.description),
+    description: includeDescription ? row.description : "",
+    descriptionDocument: includeDescription
+      ? readDescriptionDocument(row.description_document, row.description)
+      : { version: 1, blocks: [] },
     players: bridgeOnline ? Number(row.total_players ?? 0) : pingOnline ? Number(row.ping_players ?? 0) : 0,
     capacity: bridgeOnline ? Math.max(0, Number(row.max_players ?? 0)) : pingOnline ? Math.max(0, Number(row.ping_max_players ?? 0)) : 0,
     latency: pingOnline ? Math.max(0, Number(row.ping_latency_ms ?? 0)) : bridgeOnline ? Math.max(0, Number(row.average_ping_ms ?? 0)) : 0,

@@ -7,6 +7,7 @@ export interface DirectoryEnv {
   MEDIA?: R2Bucket;
   DIRECTORY_LIVE?: DurableObjectNamespace;
   VOTE_IP_HASH_SECRET?: string;
+  SITE_TRAFFIC_HASH_SECRET?: string;
   BRIDGE_MASTER_SECRET?: string;
 }
 

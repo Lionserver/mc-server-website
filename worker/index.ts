@@ -121,7 +121,11 @@ const worker = {
       if (ownerEmail) headers.set("X-MKR-Authenticated-Owner", ownerEmail);
       routedRequest = new Request(request, { headers });
     }
-    return secureResponse(await handler.fetch(routedRequest, env, ctx), url.pathname.startsWith("/embed/server/"));
+    return secureResponse(
+      await handler.fetch(routedRequest, env, ctx),
+      url.pathname.startsWith("/embed/server/"),
+      url.pathname.startsWith("/api/"),
+    );
   },
 };
 
@@ -142,12 +146,13 @@ function shouldRunPrivacyCleanup() {
   return true;
 }
 
-function secureResponse(response: Response, embeddable = false) {
+function secureResponse(response: Response, embeddable = false, noIndex = false) {
   const secured = new Response(response.body, response);
   secured.headers.set("X-Content-Type-Options", "nosniff");
   secured.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   secured.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   secured.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  if (noIndex) secured.headers.set("X-Robots-Tag", "noindex, nofollow");
   if (embeddable) {
     secured.headers.delete("X-Frame-Options");
     secured.headers.set("Cross-Origin-Opener-Policy", "unsafe-none");

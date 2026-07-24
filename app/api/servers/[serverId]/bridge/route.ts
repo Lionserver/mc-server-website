@@ -7,6 +7,10 @@ import {
 import { assertSameOrigin } from "@/lib/user-auth";
 
 type RouteContext = { params: Promise<{ serverId: string }> | { serverId: string } };
+const privateHeaders = {
+  "Cache-Control": "private, no-store",
+  Vary: "Cookie, OAI-Authenticated-User-Email",
+};
 
 export async function GET(request: Request, context: RouteContext) {
   try {
@@ -37,7 +41,7 @@ export async function GET(request: Request, context: RouteContext) {
         apiBaseUrl: new URL("/api/bridge", request.url).toString().replace(/\/$/, ""),
         verified: Boolean(bridge.verified_at),
       },
-    });
+    }, { headers: privateHeaders });
   } catch (error) {
     return directoryErrorResponse(error);
   }
@@ -103,7 +107,7 @@ export async function POST(request: Request, context: RouteContext) {
         reissued: Boolean(existingBridge),
         verified: false,
       },
-    }, { status: existingBridge ? 200 : 201 });
+    }, { status: existingBridge ? 200 : 201, headers: privateHeaders });
   } catch (error) {
     return directoryErrorResponse(error);
   }

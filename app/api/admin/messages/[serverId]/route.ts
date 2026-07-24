@@ -20,7 +20,9 @@ export async function GET(request: Request, context: RouteContext) {
       FROM admin_messages WHERE server_id = ? ORDER BY created_at DESC LIMIT 200) ORDER BY created_at ASC`).bind(serverId).all();
     await environment.DB.prepare("UPDATE admin_conversations SET unread_admin = 0, updated_at = ? WHERE server_id = ?")
       .bind(Math.floor(Date.now() / 1000), serverId).run();
-    return Response.json({ server: { id: serverId, title: server.title, ownerEmail: server.owner_email }, messages: messages.results });
+    return Response.json({ server: { id: serverId, title: server.title, ownerEmail: server.owner_email }, messages: messages.results }, {
+      headers: { "Cache-Control": "private, no-store", Vary: "Cookie" },
+    });
   } catch (error) {
     return adminErrorResponse(error);
   }

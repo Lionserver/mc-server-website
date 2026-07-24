@@ -3,6 +3,7 @@ import {
   announcementAuditSummary,
   expectedAnnouncementRevision,
   getSiteAnnouncement,
+  invalidatePublicAnnouncementState,
   overlappingPublishedAnnouncement,
   parseSiteAnnouncementInput,
 } from "@/lib/site-announcements";
@@ -62,6 +63,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ annou
       }
       return Response.json({ error: "다른 관리자 작업으로 공지가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
     }
+    invalidatePublicAnnouncementState(environment.DB);
     return Response.json({ announcement }, {
       headers: { "Cache-Control": "no-store" },
     });
@@ -101,6 +103,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ anno
     if ((result.meta.changes ?? 0) !== 1) {
       return Response.json({ error: "다른 관리자 작업으로 공지가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
     }
+    invalidatePublicAnnouncementState(environment.DB);
     return new Response(null, {
       status: 204,
       headers: { "Cache-Control": "no-store" },

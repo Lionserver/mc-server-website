@@ -34,7 +34,7 @@ export async function GET(request: Request, context: RouteContext) {
         updatedAt: asset.updated_at,
         url: `/api/servers/${serverId}/assets/${asset.kind}`,
       })),
-    });
+    }, { headers: { "Cache-Control": "private, no-store", Vary: "Cookie, OAI-Authenticated-User-Email" } });
   } catch (error) {
     return directoryErrorResponse(error);
   }

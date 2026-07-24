@@ -32,10 +32,9 @@ export function siteOriginFromHeaders(requestHeaders: HeaderReader) {
 
   try {
     const requestOrigin = new URL(`${protocol}://${requestHost}`);
-    if (!trustedMetadataHost(requestOrigin.hostname, configured.hostname)) {
-      return configured.origin;
-    }
-    return requestOrigin.origin;
+    return localMetadataHost(requestOrigin.hostname)
+      ? requestOrigin.origin
+      : configured.origin;
   } catch {
     return configured.origin;
   }
@@ -57,14 +56,7 @@ function firstHeaderValue(value: string | null) {
   return first && !/[\s/@\\]/.test(first) ? first : null;
 }
 
-function trustedMetadataHost(requestHostname: string, configuredHostname: string) {
+function localMetadataHost(requestHostname: string) {
   const hostname = requestHostname.toLowerCase();
-  const configured = configuredHostname.toLowerCase();
-  return (
-    hostname === configured ||
-    hostname === "minecraft.kr" ||
-    hostname === "www.minecraft.kr" ||
-    hostname === "localhost" ||
-    hostname === "127.0.0.1"
-  );
+  return hostname === "localhost" || hostname === "127.0.0.1";
 }

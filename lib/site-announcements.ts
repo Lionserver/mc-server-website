@@ -40,6 +40,10 @@ const MAX_TIMESTAMP = 4_102_444_800;
 const MAX_ANNOUNCEMENT_SECONDS = 366 * 86_400;
 const INVALID_TEXT_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 const schemaReadyByDatabase = new WeakMap<object, Promise<void>>();
+const publicStateCache = new WeakMap<object, {
+  payload: Awaited<ReturnType<typeof uncachedPublicAnnouncementState>>;
+  expiresAt: number;
+}>();
 
 export async function ensureSiteAnnouncementSchema(db: D1Database) {
   if (process.env.NODE_ENV === "production") return;
@@ -119,7 +123,31 @@ export async function overlappingPublishedAnnouncement(
   return row?.id ?? null;
 }
 
-export async function publicAnnouncementState(db: D1Database, now = Math.floor(Date.now() / 1000)) {
+export async function publicAnnouncementState(db: D1Database, requestedNow?: number) {
+  const now = requestedNow ?? Math.floor(Date.now() / 1000);
+  const cacheKey = db as unknown as object;
+  if (requestedNow === undefined) {
+    const cached = publicStateCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) return cached.payload;
+  }
+  const payload = await uncachedPublicAnnouncementState(db, now);
+  if (requestedNow === undefined) {
+    const transitionExpiry = payload.nextTransitionAt && payload.nextTransitionAt > now
+      ? payload.nextTransitionAt
+      : now + 15;
+    publicStateCache.set(cacheKey, {
+      payload,
+      expiresAt: Math.min(now + 15, transitionExpiry),
+    });
+  }
+  return payload;
+}
+
+export function invalidatePublicAnnouncementState(db: D1Database) {
+  publicStateCache.delete(db as unknown as object);
+}
+
+async function uncachedPublicAnnouncementState(db: D1Database, now: number) {
   await ensureSiteAnnouncementSchema(db);
   const [activeRows, nextRow] = await Promise.all([
     db.prepare(`SELECT id, title, summary, detail, publication_status, starts_at, ends_at,

@@ -8,6 +8,14 @@ import { isPrivateHostName, isPrivateOrReservedIp, networkFingerprintAddress, no
 import { announcementPhase, nextAnnouncementTransition } from "../lib/site-announcement-lifecycle.mjs";
 import { isAdminPasswordHash, isTotpSecret, verifyAdminPassword, verifyTotpCode } from "../lib/admin-credentials.mjs";
 
+async function readHomeSource() {
+  const [pageSource, directorySource] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/home-directory.tsx", import.meta.url), "utf8"),
+  ]);
+  return `${pageSource}\n${directorySource}`;
+}
+
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -45,7 +53,7 @@ test("production administrator credential primitives reject malformed values and
 
 test("server-renders the Minecraft.kr product shell", async () => {
   const [pageSource, headerSource] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../components/public-site-header.tsx", import.meta.url), "utf8"),
   ]);
   const response = await render();
@@ -73,7 +81,7 @@ test("server-renders the Minecraft.kr product shell", async () => {
 
 test("ships a measured small-community server directory", async () => {
   const [page, directory, css] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../lib/public-directory.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
@@ -89,9 +97,56 @@ test("ships a measured small-community server directory", async () => {
   assert.match(css, /\.small-server-row/);
 });
 
+test("ships a privacy-preserving KST daily visitor count in the directory status bar", async () => {
+  const [page, provider, traffic, route, layout, health, maintenance, schema, migration, totalsMigration, privacy, css, envExample] = await Promise.all([
+    readHomeSource(),
+    readFile(new URL("../components/site-traffic-provider.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/site-traffic.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/traffic/today/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/health/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/maintenance.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0024_slow_swarm.sql", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0025_sour_zzzax.sql", import.meta.url), "utf8"),
+    readFile(new URL("../app/privacy/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../.env.example", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /오늘 방문자/);
+  assert.match(page, /한국시간 기준 · 동일 네트워크는 하루 한 번 집계/);
+  assert.match(page, /useSiteTraffic/);
+  assert.match(provider, /document\.visibilityState === "visible"/);
+  assert.match(provider, /fetch\("\/api\/traffic\/today"/);
+  assert.match(provider, /millisecondsUntilNextKstDay/);
+  assert.match(provider, /requestedDay\.current === day/);
+  assert.match(traffic, /KST_OFFSET_SECONDS = 9 \* 60 \* 60/);
+  assert.match(traffic, /INSERT OR IGNORE INTO site_daily_visitors/);
+  assert.match(traffic, /SELECT visitor_count count FROM site_daily_visitor_totals/);
+  assert.doesNotMatch(traffic, /SELECT COUNT\(\*\) count FROM site_daily_visitors/);
+  assert.match(traffic, /HMAC/);
+  assert.match(traffic, /process\.env\.NODE_ENV === "production"/);
+  assert.match(traffic, /request\.headers\.get\("cf-connecting-ip"\)/);
+  assert.match(traffic, /new TextEncoder\(\)\.encode\(`\$\{day\}\\n\$\{network\}`\)/);
+  assert.doesNotMatch(traffic, /raw_address|source_ip_raw/i);
+  assert.match(route, /Cache-Control": "no-store"/);
+  assert.match(layout, /<SiteTrafficProvider>/);
+  assert.match(health, /siteTrafficPrivacySecret/);
+  assert.match(maintenance, /trafficRetentionBoundary/);
+  assert.match(schema, /siteDailyVisitors/);
+  assert.match(schema, /siteDailyVisitorTotals/);
+  assert.match(migration, /PRIMARY KEY\(`visit_day`, `visitor_hash`\)/);
+  assert.match(totalsMigration, /CREATE TRIGGER `site_daily_visitors_increment_total`/);
+  assert.match(totalsMigration, /ON CONFLICT\(`visit_day`\) DO UPDATE/);
+  assert.match(privacy, /일일 방문 대조값은 최대 3일/);
+  assert.match(privacy, /OpenAI OpCo, LLC \(ChatGPT Sites\)/);
+  assert.match(css, /\.today-visitor-stat \{ margin-left:auto/);
+  assert.match(envExample, /SITE_TRAFFIC_HASH_SECRET/);
+});
+
 test("ships a seven-day newly registered server directory", async () => {
   const [page, directory, css] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../lib/public-directory.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
@@ -109,7 +164,7 @@ test("ships a seven-day newly registered server directory", async () => {
 
 test("keeps featured directory result shells vertically aligned", async () => {
   const [page, css] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
   assert.match(page, /small-server-group featured-server-group/);
@@ -195,7 +250,7 @@ test("ships downloadable Paper/Folia and Velocity bridge plugins", async () => {
 
 test("keeps verified servers online through cached public Minecraft status pings", async () => {
   const [page, directory, bridgeApi, ownerVerify, pluginVerify, schema, migration] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../lib/public-directory.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/bridge-api.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/servers/[serverId]/bridge/verify/route.ts", import.meta.url), "utf8"),
@@ -219,7 +274,7 @@ test("keeps verified servers online through cached public Minecraft status pings
 
 test("ships owner-controlled contact links, web trend monitoring, bridge disclosure and save feedback", async () => {
   const [page, operator, directory, serverRoute, telemetryRoute, worker, vite, schema, migration, css] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/public-directory.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/servers/[serverId]/route.ts", import.meta.url), "utf8"),
@@ -383,7 +438,7 @@ test("ships a structured server-introduction editor with safe poster uploads", a
     readFile(new URL("../components/server-description-editor.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../lib/server-description.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/servers/[serverId]/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/servers/route.ts", import.meta.url), "utf8"),
@@ -420,7 +475,9 @@ test("ships a structured server-introduction editor with safe poster uploads", a
   assert.match(registration, /confirmation: createdServerTitle/);
   assert.match(operator, /ServerDescriptionEditor/);
   assert.match(page, /ServerDescription document=/);
-  assert.doesNotMatch(`${editor}\n${page}`, /dangerouslySetInnerHTML|contentEditable/);
+  assert.doesNotMatch(editor, /dangerouslySetInnerHTML|contentEditable/);
+  assert.doesNotMatch(page, /contentEditable/);
+  assert.match(page, /dangerouslySetInnerHTML=\{\{ __html: safeJsonLd\(itemList\) \}\}/);
   assert.match(description, /허용되지 않은 서버 소개 내용/);
   assert.match(description, /홍보 포스터는 최대 12장/);
   assert.match(description, /parseTextRuns/);
@@ -569,7 +626,7 @@ test("server-renders real policy destinations", async () => {
 test("ships passwordless owner auth and audited ownership transfer flows", async () => {
   const [login, home, broadcasts, header, operator, registration, admin, userAuth, ownership, worker, schema, migration, packageJson] = await Promise.all([
     readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../app/broadcasts/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/public-site-header.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
@@ -623,7 +680,7 @@ test("ships passwordless owner auth and audited ownership transfer flows", async
 
 test("ships responsive, accessible, realtime and exact-spec product assets", async () => {
   const [page, trendChart, timedMotion, operator, registration, adminPage, adminSecurity, chatRealtime, chatHook, chatRoom, directoryRoom, directoryRealtime, publicDirectory, premiumAuction, votesApi, worker, css, layout, packageJson, schema, directoryApi, assetApi, assetServe, serverDirectory, serverUpdate, imageAssets, imageCrop, motionCropMigration, og] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../components/player-trend-chart.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/use-timed-motion.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
@@ -940,7 +997,7 @@ test("keeps launch UI resilient across narrow layouts, focus flows and optional 
     home, broadcasts, header, registration, cropEditor, descriptionEditor,
     admin, login, operator, timedMotion, css,
   ] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../app/broadcasts/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/public-site-header.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
@@ -1096,7 +1153,7 @@ test("blocks recommendation spam by pseudonymous IP source without storing raw I
 
 test("ships free-form three-tag server categories ranked by live usage", async () => {
   const [page, operator, registration, tagEditor, categoryRules, directory, publicDirectory, css, smoke] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readHomeSource(),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-category-tags.tsx", import.meta.url), "utf8"),
@@ -1227,7 +1284,7 @@ test("ships scheduled global notices with secure admin lifecycle controls", asyn
   assert.match(admin, /site-announcements:refresh/);
   assert.match(admin, /revision: form\.revision \?\? undefined/);
   assert.match(admin, /공지를 내리고 보관할까요/);
-  assert.match(publicRoute, /Cache-Control": "no-store"/);
+  assert.match(publicRoute, /s-maxage=15/);
   assert.match(collectionRoute, /requireAdmin\(request, \{ mutating: true \}\)/);
   assert.match(collectionRoute, /NOT EXISTS/);
   assert.match(collectionRoute, /prepareAuditWrite/);
@@ -1235,6 +1292,7 @@ test("ships scheduled global notices with secure admin lifecycle controls", asyn
   assert.match(itemRoute, /deleted_at = \?/);
   assert.match(model, /starts_at < \? AND ends_at > \?/);
   assert.match(model, /starts_at <= \? AND ends_at > \?/);
+  assert.match(model, /invalidatePublicAnnouncementState/);
   assert.match(model, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(schema, /siteAnnouncements = sqliteTable/);
   assert.match(migration, /CREATE TABLE `site_announcements`/);
@@ -1268,7 +1326,7 @@ test("uses half-open scheduled notice windows and the nearest transition", () =>
 });
 
 test("publishes crawlable metadata routes and indexable server detail documents", async () => {
-  const [robotsResponse, sitemapResponse, manifestResponse, faviconResponse, adminResponse, serverPage, seoModel] =
+  const [robotsResponse, sitemapResponse, manifestResponse, faviconResponse, adminResponse, serverPage, seoModel, siteUrl, publicDirectory, worker] =
     await Promise.all([
       render("/robots.txt"),
       render("/sitemap.xml"),
@@ -1277,6 +1335,9 @@ test("publishes crawlable metadata routes and indexable server detail documents"
       render("/admin"),
       readFile(new URL("../app/servers/[serverId]/page.tsx", import.meta.url), "utf8"),
       readFile(new URL("../lib/public-server-seo.ts", import.meta.url), "utf8"),
+      readFile(new URL("../lib/site-url.ts", import.meta.url), "utf8"),
+      readFile(new URL("../lib/public-directory.ts", import.meta.url), "utf8"),
+      readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     ]);
 
   assert.equal(robotsResponse.status, 200);
@@ -1305,4 +1366,9 @@ test("publishes crawlable metadata routes and indexable server detail documents"
   assert.match(serverPage, /safeJsonLd/);
   assert.match(seoModel, /WHERE d\.id = \? AND d\.status = 'active' AND d\.deleted_at IS NULL/);
   assert.doesNotMatch(seoModel, /CREATE TABLE|ALTER TABLE|PRAGMA/);
+  assert.match(siteUrl, /localMetadataHost\(requestOrigin\.hostname\)[\s\S]*configured\.origin/);
+  assert.doesNotMatch(siteUrl, /hostname === "minecraft\.kr"|hostname === "www\.minecraft\.kr"/);
+  assert.match(publicDirectory, /serializePublicRow\(row, now, false\)/);
+  assert.match(publicDirectory, /includeDescription \? row\.description : ""/);
+  assert.match(worker, /X-Robots-Tag", "noindex, nofollow"/);
 });

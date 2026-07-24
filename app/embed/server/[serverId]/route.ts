@@ -11,7 +11,7 @@ export async function GET(request: Request, context: RouteContext) {
   if (!server) return new Response("server not found", { status: 404 });
 
   const origin = new URL(request.url).origin;
-  const detailUrl = `${origin}/?server=${server.id}`;
+  const detailUrl = `${origin}/servers/${server.id}`;
   const icon = server.hasIcon ? `${origin}/api/servers/${server.id}/assets/icon` : "";
   const statusClass = server.online ? "online" : "offline";
   const statusLabel = server.online ? "NOW BOARDING" : "GATE CLOSED";
@@ -31,6 +31,7 @@ export async function GET(request: Request, context: RouteContext) {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "public, max-age=15, stale-while-revalidate=15",
       "X-Content-Type-Options": "nosniff",
+      "X-Robots-Tag": "noindex, follow",
     },
   });
 }

@@ -100,8 +100,10 @@ export default async function PublicServerPage({ params }: ServerPageProps) {
         mainEntityOfPage: canonical,
         playersOnline: server.players,
         serverStatus: server.online
-          ? "https://schema.org/Online"
-          : "https://schema.org/Offline",
+          ? server.capacity > 0 && server.players >= server.capacity
+            ? "https://schema.org/OnlineFull"
+            : "https://schema.org/Online"
+          : "https://schema.org/OfflineTemporarily",
         game: {
           "@type": "VideoGame",
           name: "Minecraft",
@@ -209,17 +211,17 @@ export default async function PublicServerPage({ params }: ServerPageProps) {
             <h2 id="links-title">서버 공식 채널</h2>
             <div>
               {server.websiteUrl ? (
-                <a href={server.websiteUrl} target="_blank" rel="noreferrer">
+                <a href={server.websiteUrl} target="_blank" rel="ugc nofollow noopener noreferrer">
                   공식 웹사이트
                 </a>
               ) : null}
               {server.discordUrl ? (
-                <a href={server.discordUrl} target="_blank" rel="noreferrer">
+                <a href={server.discordUrl} target="_blank" rel="ugc nofollow noopener noreferrer">
                   Discord
                 </a>
               ) : null}
               {server.kakaoUrl ? (
-                <a href={server.kakaoUrl} target="_blank" rel="noreferrer">
+                <a href={server.kakaoUrl} target="_blank" rel="ugc nofollow noopener noreferrer">
                   카카오톡
                 </a>
               ) : null}
