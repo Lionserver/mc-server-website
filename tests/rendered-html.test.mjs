@@ -1268,11 +1268,12 @@ test("uses half-open scheduled notice windows and the nearest transition", () =>
 });
 
 test("publishes crawlable metadata routes and indexable server detail documents", async () => {
-  const [robotsResponse, sitemapResponse, manifestResponse, adminResponse, serverPage, seoModel] =
+  const [robotsResponse, sitemapResponse, manifestResponse, faviconResponse, adminResponse, serverPage, seoModel] =
     await Promise.all([
       render("/robots.txt"),
       render("/sitemap.xml"),
       render("/manifest.webmanifest"),
+      render("/favicon.ico"),
       render("/admin"),
       readFile(new URL("../app/servers/[serverId]/page.tsx", import.meta.url), "utf8"),
       readFile(new URL("../lib/public-server-seo.ts", import.meta.url), "utf8"),
@@ -1292,6 +1293,9 @@ test("publishes crawlable metadata routes and indexable server detail documents"
   const manifest = await manifestResponse.json();
   assert.equal(manifest.lang, "ko-KR");
   assert.equal(manifest.icons.length, 2);
+
+  assert.equal(faviconResponse.status, 308);
+  assert.equal(faviconResponse.headers.get("location"), "http://localhost/icon-192.png");
 
   assert.equal(adminResponse.status, 200);
   assert.match(await adminResponse.text(), /name="robots" content="noindex, nofollow, noarchive"/);
