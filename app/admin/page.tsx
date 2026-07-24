@@ -155,25 +155,35 @@ export default function AdminPage() {
         <Stat icon={<MessageSquare />} label="미확인 대화" value={overview.stats.unreadMessages} />
         <Stat icon={<ArrowRightLeft />} label="소유권 심사" value={overview.stats.pendingOwnership} />
       </section>
-      <nav className="admin-tabs" aria-label="총관리자 메뉴">
+      <nav className="admin-tabs" role="tablist" aria-label="총관리자 메뉴">
         {([[
           "announcements", "공지사항", Megaphone
         ], ["servers", "서버 제어", Server
         ], ["votes", "추천 기록", Trophy], ["enforcements", "서버 제재", ShieldAlert], ["identity", "본인인증", ShieldCheck], ["ownership", "소유권 심사", ArrowRightLeft], ["premium", "프리미엄", Crown], ["blacklist", "블랙리스트", Ban], ["messages", "직통라인", MessageSquare], ["cache", "캐시 정리", HardDrive], ["audit", "감사 로그", BarChart3]] as const).map(([key, label, Icon]) =>
-          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}><Icon size={16} />{label}{key === "announcements" && overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length > 0 && <b>{overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length}</b>}{key === "enforcements" && overview.stats.activeEnforcements > 0 && <b>{overview.stats.activeEnforcements}</b>}{key === "messages" && overview.stats.unreadMessages > 0 && <b>{overview.stats.unreadMessages}</b>}{key === "ownership" && overview.stats.pendingOwnership > 0 && <b>{overview.stats.pendingOwnership}</b>}{key === "identity" && overview.identities.filter((item) => item.identity_verification_status !== "verified").length > 0 && <b>{overview.identities.filter((item) => item.identity_verification_status !== "verified").length}</b>}</button>)}
+          <button key={key} type="button" id={`admin-tab-${key}`} role="tab" aria-selected={tab === key} aria-controls={`admin-tabpanel-${key}`} tabIndex={tab === key ? 0 : -1} className={tab === key ? "active" : ""} onClick={() => setTab(key)} onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const tabs = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
+            const index = tabs.indexOf(event.currentTarget);
+            const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+            tabs[nextIndex]?.focus();
+            tabs[nextIndex]?.click();
+          }}><Icon size={16} />{label}{key === "announcements" && overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length > 0 && <b>{overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length}</b>}{key === "enforcements" && overview.stats.activeEnforcements > 0 && <b>{overview.stats.activeEnforcements}</b>}{key === "messages" && overview.stats.unreadMessages > 0 && <b>{overview.stats.unreadMessages}</b>}{key === "ownership" && overview.stats.pendingOwnership > 0 && <b>{overview.stats.pendingOwnership}</b>}{key === "identity" && overview.identities.filter((item) => item.identity_verification_status !== "verified").length > 0 && <b>{overview.identities.filter((item) => item.identity_verification_status !== "verified").length}</b>}</button>)}
       </nav>
       {notice && <div className="admin-notice" role="status">{notice}</div>}
-      {tab === "announcements" && <AnnouncementControl entries={overview.announcements} busy={busy} run={run} refresh={loadOverview} now={adminNow} />}
-      {tab === "servers" && <ServerControl servers={overview.servers} busy={busy} run={run} refresh={loadOverview} />}
-      {tab === "votes" && <VoteLogControl servers={overview.servers} />}
-      {tab === "enforcements" && <EnforcementControl entries={overview.enforcements} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} />}
-      {tab === "identity" && <IdentityControl accounts={overview.identities} busy={busy} run={run} refresh={loadOverview} />}
-      {tab === "ownership" && <OwnershipControl claims={overview.ownership.claims} transfers={overview.ownership.transfers} busy={busy} run={run} refresh={loadOverview} />}
-      {tab === "premium" && <PremiumAuctionControl busy={busy} run={run} servers={overview.servers.filter((item) => !item.deletedAt)} />}
-      {tab === "blacklist" && <BlacklistControl entries={overview.blacklist} busy={busy} run={run} refresh={loadOverview} />}
-      {tab === "messages" && <MessageControl conversations={overview.conversations} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} realtimeEvent={latestChatEvent} connectionStatus={adminChatConnection} />}
-      {tab === "cache" && <CacheControl busy={busy} run={run} />}
-      {tab === "audit" && <AuditLog entries={overview.audits} />}
+      <section id={`admin-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`admin-tab-${tab}`} tabIndex={0}>
+        {tab === "announcements" && <AnnouncementControl entries={overview.announcements} busy={busy} run={run} refresh={loadOverview} now={adminNow} />}
+        {tab === "servers" && <ServerControl servers={overview.servers} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "votes" && <VoteLogControl servers={overview.servers} />}
+        {tab === "enforcements" && <EnforcementControl entries={overview.enforcements} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "identity" && <IdentityControl accounts={overview.identities} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "ownership" && <OwnershipControl claims={overview.ownership.claims} transfers={overview.ownership.transfers} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "premium" && <PremiumAuctionControl busy={busy} run={run} servers={overview.servers.filter((item) => !item.deletedAt)} />}
+        {tab === "blacklist" && <BlacklistControl entries={overview.blacklist} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "messages" && <MessageControl conversations={overview.conversations} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} realtimeEvent={latestChatEvent} connectionStatus={adminChatConnection} />}
+        {tab === "cache" && <CacheControl busy={busy} run={run} />}
+        {tab === "audit" && <AuditLog entries={overview.audits} />}
+      </section>
     </>}
   </AdminFrame>;
 }
@@ -204,7 +214,7 @@ function AdminLogin({ onSuccess }: { onSuccess: () => Promise<void> }) {
       <label>관리자 이메일<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label>
       <label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>
       <label>OTP 6자리<input inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))} autoComplete="one-time-code" required /></label>
-      {error && <div className="admin-form-error">{error}</div>}<button className="admin-primary" disabled={busy}>{busy ? "인증 중…" : "보안 로그인"}</button>
+      {error && <div className="admin-form-error" role="alert">{error}</div>}<button className="admin-primary" disabled={busy}>{busy ? "인증 중…" : "보안 로그인"}</button>
     </form><small>5회 실패 시 15분간 로그인이 잠깁니다.</small>
   </section></AdminFrame>;
 }

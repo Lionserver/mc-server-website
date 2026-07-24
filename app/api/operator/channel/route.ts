@@ -56,7 +56,7 @@ export async function POST(request: Request) {
     await broadcastOperatorChatEvent(environment, {
       type: "chat.message",
       serverId: server.id,
-      message: { id, sender_role: "owner", sender_email: ownerEmail, server_title: server.title, body, created_at: now },
+      message: { id, sender_role: "owner", sender_email: "", server_title: server.title, body, created_at: now },
     }).catch(() => false);
     await environment.DB.prepare(`DELETE FROM operator_channel_messages WHERE id IN (
       SELECT id FROM operator_channel_messages ORDER BY created_at DESC LIMIT -1 OFFSET 2000

@@ -3,8 +3,11 @@ import Link from "next/link";
 import { DiscordContactWidget } from "@/components/discord-contact-widget";
 
 export const metadata: Metadata = {
-  title: "이용약관 — Minecraft.kr",
+  title: "이용약관",
   description: "Minecraft.kr 서버 디렉터리 이용약관",
+  alternates: {
+    canonical: "/terms",
+  },
 };
 
 export default function TermsPage() {

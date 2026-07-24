@@ -1,10 +1,12 @@
 import { directoryEnv, directoryErrorResponse } from "@/lib/server-directory";
 import { MinecraftProfileLookupError, resolveMinecraftProfile } from "@/lib/minecraft-profile";
+import { assertPublicProfileRateLimit } from "@/lib/request-guards";
 
 export async function GET(request: Request) {
   try {
     const nickname = new URL(request.url).searchParams.get("nickname")?.trim() ?? "";
     const environment = await directoryEnv();
+    await assertPublicProfileRateLimit(environment.DB, request);
     const profile = await resolveMinecraftProfile(environment.DB, nickname);
     return Response.json({ profile }, { headers: { "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800" } });
   } catch (error) {

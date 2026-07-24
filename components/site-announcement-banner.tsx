@@ -142,6 +142,9 @@ export function SiteAnnouncementBanner({
 
   if (!announcements.length || !selected) return null;
   const lead = announcements[0];
+  const selectedIndex = Math.max(0, announcements.findIndex((announcement) => announcement.id === selected.id));
+  const selectedTabId = `site-announcement-tab-${selectedIndex}`;
+  const detailPanelId = "site-announcement-detail-panel";
 
   return <aside ref={bannerRef} className="site-announcement-banner" aria-label="서비스 공지" aria-live="polite">
     <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -165,16 +168,37 @@ export function SiteAnnouncementBanner({
             <span><Megaphone size={15} aria-hidden="true" /> SERVICE NOTICE</span>
             <Dialog.Close asChild><button type="button" aria-label="공지 상세 닫기"><X size={18} /></button></Dialog.Close>
           </div>
-          {announcements.length > 1 && <nav className="site-announcement-dialog-tabs" aria-label="현재 공지 목록">
-            {announcements.map((announcement) => <button
+          {announcements.length > 1 && <nav className="site-announcement-dialog-tabs" role="tablist" aria-label="현재 공지 목록">
+            {announcements.map((announcement, index) => <button
               type="button"
               key={announcement.id}
+              id={`site-announcement-tab-${index}`}
               className={selected.id === announcement.id ? "active" : ""}
-              aria-pressed={selected.id === announcement.id}
+              role="tab"
+              aria-selected={selected.id === announcement.id}
+              aria-controls={detailPanelId}
+              tabIndex={selected.id === announcement.id ? 0 : -1}
               onClick={() => setSelectedId(announcement.id)}
+              onKeyDown={(event) => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const nextIndex = event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? announcements.length - 1
+                    : (index + (event.key === "ArrowRight" ? 1 : -1) + announcements.length) % announcements.length;
+                setSelectedId(announcements[nextIndex].id);
+                window.requestAnimationFrame(() => document.getElementById(`site-announcement-tab-${nextIndex}`)?.focus());
+              }}
             >{announcement.title}</button>)}
           </nav>}
-          <div className="site-announcement-dialog-body">
+          <div
+            className="site-announcement-dialog-body"
+            id={detailPanelId}
+            role={announcements.length > 1 ? "tabpanel" : undefined}
+            aria-labelledby={announcements.length > 1 ? selectedTabId : undefined}
+            tabIndex={announcements.length > 1 ? 0 : undefined}
+          >
             <span className="site-announcement-dialog-kicker">MINECRAFT.KR 운영 안내</span>
             <Dialog.Title>{selected.title}</Dialog.Title>
             <Dialog.Description id="site-announcement-description" className="site-announcement-dialog-summary">{selected.summary}</Dialog.Description>

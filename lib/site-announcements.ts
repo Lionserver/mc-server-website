@@ -42,6 +42,7 @@ const INVALID_TEXT_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 const schemaReadyByDatabase = new WeakMap<object, Promise<void>>();
 
 export async function ensureSiteAnnouncementSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   const key = db as unknown as object;
   const existing = schemaReadyByDatabase.get(key);
   if (existing) return existing;

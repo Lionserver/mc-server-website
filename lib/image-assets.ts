@@ -9,6 +9,8 @@ export const assetSpecs = {
 export type AssetKind = keyof typeof assetSpecs;
 
 export const motionAssetTypes = new Set(["image/gif", "video/webm"]);
+const MAX_MOTION_PIXELS = 8_294_400;
+const MAX_GIF_FRAMES = 300;
 
 export function isMotionAssetType(contentType: string) {
   return motionAssetTypes.has(contentType);
@@ -43,6 +45,21 @@ export async function validateAsset(file: File, kind: AssetKind) {
   const autoFitMotion = isMotionAssetType(file.type) && motionAssetAutoFits(kind);
   if (!dimensions || (!autoFitMotion && (dimensions.width !== spec.width || dimensions.height !== spec.height))) {
     throw Response.json({ error: `${kind} must be exactly ${spec.width}x${spec.height}` }, { status: 400 });
+  }
+  if (autoFitMotion && (
+    dimensions.width < 1
+    || dimensions.height < 1
+    || dimensions.width > 3_840
+    || dimensions.height > 2_160
+    || dimensions.width * dimensions.height > MAX_MOTION_PIXELS
+  )) {
+    throw Response.json({ error: `${kind} motion media exceeds the safe pixel limit` }, { status: 400 });
+  }
+  if (file.type === "image/gif") {
+    const frameCount = gifFrameCount(bytes, MAX_GIF_FRAMES + 1);
+    if (frameCount === null || frameCount > MAX_GIF_FRAMES) {
+      throw Response.json({ error: `${kind} GIF is malformed or has more than ${MAX_GIF_FRAMES} frames` }, { status: 400 });
+    }
   }
   return {
     file,
@@ -104,6 +121,51 @@ function mediaDimensions(bytes: Uint8Array, contentType: string) {
     return webmDimensions(bytes);
   }
   return null;
+}
+
+function gifFrameCount(bytes: Uint8Array, stopAfter: number) {
+  if (bytes.length < 13 || !new Set(["GIF87a", "GIF89a"]).has(ascii(bytes, 0, 6))) return null;
+  let offset = 13;
+  const packed = bytes[10];
+  if ((packed & 0x80) !== 0) {
+    offset += 3 * 2 ** ((packed & 0x07) + 1);
+  }
+  let frames = 0;
+  while (offset < bytes.length) {
+    const marker = bytes[offset++];
+    if (marker === 0x3b) return frames;
+    if (marker === 0x21) {
+      if (offset >= bytes.length) return null;
+      offset += 1;
+      offset = skipGifSubBlocks(bytes, offset);
+      if (offset < 0) return null;
+      continue;
+    }
+    if (marker !== 0x2c || offset + 9 > bytes.length) return null;
+    const imagePacked = bytes[offset + 8];
+    offset += 9;
+    if ((imagePacked & 0x80) !== 0) {
+      offset += 3 * 2 ** ((imagePacked & 0x07) + 1);
+    }
+    if (offset >= bytes.length) return null;
+    offset += 1;
+    offset = skipGifSubBlocks(bytes, offset);
+    if (offset < 0) return null;
+    frames += 1;
+    if (frames >= stopAfter) return frames;
+  }
+  return null;
+}
+
+function skipGifSubBlocks(bytes: Uint8Array, start: number) {
+  let offset = start;
+  while (offset < bytes.length) {
+    const size = bytes[offset++];
+    if (size === 0) return offset;
+    if (offset + size > bytes.length) return -1;
+    offset += size;
+  }
+  return -1;
 }
 
 function webmDimensions(bytes: Uint8Array) {

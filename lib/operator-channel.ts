@@ -19,6 +19,7 @@ export type OperatorChannelMessage = {
 };
 
 export async function ensureOperatorChannelSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   await ensureAdminSchema(db);
 }
 
@@ -27,7 +28,7 @@ export function serializeOperatorMessage(row: OperatorChannelRow): OperatorChann
     id: row.id,
     serverId: row.server_id,
     serverTitle: row.server_title,
-    ownerEmail: row.owner_email,
+    ownerEmail: "",
     body: row.body,
     createdAt: row.created_at,
   };

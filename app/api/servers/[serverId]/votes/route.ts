@@ -39,6 +39,13 @@ export async function POST(request: Request, context: RouteContext) {
     const now = Math.floor(Date.now() / 1000);
     const source = await voteSourceMetadata(request, serverId, environment);
     await assertVoteSourceAllowed(environment.DB, source.ipHash, now);
+    const day = new Date((now + 9 * 3600) * 1000).toISOString().slice(0, 10);
+    const priorSourceVote = await environment.DB.prepare(`SELECT 1 duplicate_vote FROM server_votes
+      WHERE server_id = ? AND vote_day = ? AND source_fingerprint IN (?, ?) LIMIT 1`)
+      .bind(serverId, day, source.fingerprint, source.legacyFingerprint).first();
+    if (priorSourceVote) {
+      return Response.json({ error: "이 접속 환경에서는 오늘 이미 추천했습니다." }, { status: 409 });
+    }
     let profile;
     try {
       profile = await resolveMinecraftProfile(environment.DB, nickname);
@@ -51,7 +58,6 @@ export async function POST(request: Request, context: RouteContext) {
       }
       throw error;
     }
-    const day = new Date((now + 9 * 3600) * 1000).toISOString().slice(0, 10);
     const id = crypto.randomUUID().replaceAll("-", "");
     try {
       await environment.DB.prepare(`INSERT INTO server_votes

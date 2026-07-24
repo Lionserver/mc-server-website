@@ -103,6 +103,21 @@ export const userSessions = sqliteTable(
   ],
 );
 
+export const securityRateLimits = sqliteTable(
+  "security_rate_limits",
+  {
+    bucket: text("bucket").notNull(),
+    identityHash: text("identity_hash").notNull(),
+    windowStarted: integer("window_started").notNull(),
+    requestCount: integer("request_count").notNull().default(0),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.bucket, table.identityHash] }),
+    index("security_rate_limits_updated_idx").on(table.updatedAt),
+  ],
+);
+
 export const serverOwnershipTransfers = sqliteTable(
   "server_ownership_transfers",
   {

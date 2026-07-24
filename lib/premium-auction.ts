@@ -1,4 +1,4 @@
-import { ensureAdminSchema, synchronizeServerEnforcements, writeAudit } from "@/lib/admin-security";
+import { ensureAdminSchema, prepareAuditWrite, synchronizeServerEnforcements, writeAudit } from "@/lib/admin-security";
 import { ensureUserAuthSchema } from "@/lib/user-auth";
 
 export type AuctionStatus = "scheduled" | "open" | "closing" | "closed" | "cancelled";
@@ -47,6 +47,7 @@ const BLIND_WINDOW_SECONDS = 5 * 60;
 const MINIMUM_BLIND_DURATION_SECONDS = 30;
 
 export async function ensurePremiumAuctionSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   await ensureAdminSchema(db);
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS premium_auctions (
@@ -419,25 +420,30 @@ export async function fillCurrentPremiumVacancy(db: D1Database, serverId: string
   }
   const now = unixNow();
   const window = await currentPlacementWindow(db, now);
-  const occupied = await db.prepare(`SELECT COUNT(DISTINCT server_id) count FROM premium_placements
-    WHERE status = 'active' AND starts_at <= ? AND ends_at > ?`).bind(now, now).first<{ count: number }>();
-  if ((occupied?.count ?? 0) >= window.capacity) throw Response.json({ error: "현재 광고 슬롯이 모두 사용 중입니다." }, { status: 409 });
-  const duplicate = await db.prepare(`SELECT id FROM premium_placements WHERE server_id = ?
-    AND status IN ('active', 'scheduled') AND starts_at < ? AND ends_at > ? LIMIT 1`)
-    .bind(serverId, window.endsAt, now).first<{ id: string }>();
-  if (duplicate) throw Response.json({ error: "선택한 서버는 이미 현재 광고 주간에 배치되어 있습니다." }, { status: 409 });
   const note = typeof noteValue === "string" ? noteValue.trim().slice(0, 200) : "";
   const id = crypto.randomUUID().replaceAll("-", "");
-  await db.prepare(`INSERT INTO premium_placements
-    (id, origin_key, auction_id, award_id, server_id, server_title, owner_email, source, amount, status,
-      starts_at, ends_at, note, created_by, created_at, updated_at)
-    VALUES (?, ?, ?, NULL, ?, ?, ?, 'manual_fill', 0, 'active', ?, ?, ?, ?, ?, ?)`)
-    .bind(id, `manual:${id}`, window.auctionId, server.id, server.title, server.owner_email,
-      now, window.endsAt, note || "총관리자 빈 슬롯 수동 배치", adminEmail, now, now).run();
+  const details = { serverId: server.id, serverTitle: server.title, startsAt: now, endsAt: window.endsAt };
+  const results = await db.batch([
+    db.prepare(`INSERT INTO premium_placements
+      (id, origin_key, auction_id, award_id, server_id, server_title, owner_email, source, amount, status,
+        starts_at, ends_at, note, created_by, created_at, updated_at)
+      SELECT ?, ?, ?, NULL, ?, ?, ?, 'manual_fill', 0, 'active', ?, ?, ?, ?, ?, ?
+      WHERE (SELECT COUNT(DISTINCT server_id) FROM premium_placements
+        WHERE status = 'active' AND starts_at <= ? AND ends_at > ?) < ?
+        AND NOT EXISTS (SELECT 1 FROM premium_placements WHERE server_id = ?
+          AND status IN ('active', 'scheduled') AND starts_at < ? AND ends_at > ?)`)
+      .bind(id, `manual:${id}`, window.auctionId, server.id, server.title, server.owner_email,
+        now, window.endsAt, note || "총관리자 빈 슬롯 수동 배치", adminEmail, now, now,
+        now, now, window.capacity, serverId, window.endsAt, now),
+    prepareAuditWrite(db, adminEmail, "premium.placement.manual_filled", "premium_placement", id, details, {
+      createdAt: now,
+      onlyIfPreviousStatementChanged: true,
+    }),
+  ]);
+  if ((results[0].meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "광고 슬롯이 이미 찼거나 선택한 서버가 배치되어 있습니다. 새로고침 후 다시 확인해 주세요." }, { status: 409 });
+  }
   await synchronizePremiumPlacements(db, now);
-  await writeAudit(db, adminEmail, "premium.placement.manual_filled", "premium_placement", id, {
-    serverId: server.id, serverTitle: server.title, startsAt: now, endsAt: window.endsAt,
-  });
   return id;
 }
 
@@ -449,12 +455,19 @@ export async function cancelManualPremiumPlacement(db: D1Database, placementId: 
     throw Response.json({ error: "현재 노출 중인 수동 배치만 해제할 수 있습니다." }, { status: 409 });
   }
   const now = unixNow();
-  await db.prepare("UPDATE premium_placements SET status = 'cancelled', updated_at = ? WHERE id = ?")
-    .bind(now, placementId).run();
+  const results = await db.batch([
+    db.prepare(`UPDATE premium_placements SET status = 'cancelled', updated_at = ?
+      WHERE id = ? AND source IN ('manual_fill', 'legacy_manual') AND status IN ('active', 'scheduled')`)
+      .bind(now, placementId),
+    prepareAuditWrite(db, adminEmail, "premium.placement.manual_cancelled", "premium_placement", placementId, {
+      serverId: placement.server_id,
+      serverTitle: placement.server_title,
+    }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+  ]);
+  if ((results[0].meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "다른 요청에서 이미 광고 배치 상태가 변경되었습니다." }, { status: 409 });
+  }
   await synchronizePremiumPlacements(db, now);
-  await writeAudit(db, adminEmail, "premium.placement.manual_cancelled", "premium_placement", placementId, {
-    serverId: placement.server_id, serverTitle: placement.server_title,
-  });
 }
 
 export async function adminAuctionDashboard(db: D1Database) {
@@ -499,9 +512,20 @@ export async function updatePremiumAuctionRules(db: D1Database, auctionId: strin
   const minimumBid = boundedInteger(payload.minimumBid, 1_000, 2_000_000_000, "최소 입찰가");
   const minimumIncrement = boundedInteger(payload.minimumIncrement, 1_000, 100_000_000, "최소 인상액");
   const now = unixNow();
-  await db.prepare(`UPDATE premium_auctions SET slot_count = ?, minimum_bid = ?, minimum_increment = ?, updated_at = ? WHERE id = ?`)
-    .bind(slotCount, minimumBid, minimumIncrement, now, auctionId).run();
-  await writeAudit(db, adminEmail, "premium.auction.rules.updated", "premium_auction", auctionId, { slotCount, minimumBid, minimumIncrement });
+  const results = await db.batch([
+    db.prepare(`UPDATE premium_auctions SET slot_count = ?, minimum_bid = ?, minimum_increment = ?, updated_at = ?
+      WHERE id = ? AND status IN ('scheduled', 'open')
+        AND NOT EXISTS (SELECT 1 FROM premium_bids WHERE auction_id = ?)`)
+      .bind(slotCount, minimumBid, minimumIncrement, now, auctionId, auctionId),
+    prepareAuditWrite(db, adminEmail, "premium.auction.rules.updated", "premium_auction", auctionId, {
+      slotCount,
+      minimumBid,
+      minimumIncrement,
+    }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+  ]);
+  if ((results[0].meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "입찰 또는 경매 상태가 이미 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+  }
 }
 
 export async function finalizePremiumAuction(db: D1Database, auctionId: string, actorEmail: string, force: boolean) {
@@ -511,11 +535,14 @@ export async function finalizePremiumAuction(db: D1Database, auctionId: string, 
   const now = unixNow();
   if (!force && auction.bidding_closes_at > now) return false;
   if (!new Set(["scheduled", "open", "closing"]).has(auction.status)) return auction.status === "closed";
-  if (auction.status !== "closing") {
-    const acquired = await db.prepare(`UPDATE premium_auctions SET status = 'closing', updated_at = ?
-      WHERE id = ? AND status IN ('scheduled', 'open')`).bind(now, auctionId).run();
-    if ((acquired.meta.changes ?? 0) < 1) return false;
-  }
+  const acquired = auction.status === "closing"
+    ? await db.prepare(`UPDATE premium_auctions SET updated_at = ?
+        WHERE id = ? AND status = 'closing' AND updated_at <= ?`)
+      .bind(now, auctionId, now - 120).run()
+    : await db.prepare(`UPDATE premium_auctions SET status = 'closing', updated_at = ?
+        WHERE id = ? AND status IN ('scheduled', 'open')`)
+      .bind(now, auctionId).run();
+  if ((acquired.meta.changes ?? 0) < 1) return false;
   const eligible = await db.prepare(`SELECT b.* FROM premium_bids b
     JOIN directory_servers d ON d.id = b.server_id
     JOIN bridge_servers bridge ON bridge.server_id = d.bridge_server_id
@@ -525,22 +552,31 @@ export async function finalizePremiumAuction(db: D1Database, auctionId: string, 
       AND bridge.verified_at IS NOT NULL AND account.identity_verification_status = 'verified'
     ORDER BY b.amount DESC, b.updated_at ASC`).bind(auctionId).all<BidRow>();
   const winners = eligible.results.slice(0, auction.slot_count);
-  await db.prepare("UPDATE premium_bids SET status = 'loser', updated_at = ? WHERE auction_id = ? AND status = 'active'")
-    .bind(now, auctionId).run();
+  const statements: D1PreparedStatement[] = [
+    db.prepare("UPDATE premium_bids SET status = 'loser', updated_at = ? WHERE auction_id = ? AND status = 'active'")
+      .bind(now, auctionId),
+  ];
   for (const bid of winners) {
-    await db.batch([
+    statements.push(
       db.prepare("UPDATE premium_bids SET status = 'winner_pending', updated_at = ? WHERE id = ?").bind(now, bid.id),
       db.prepare(`INSERT OR IGNORE INTO premium_awards
         (id, auction_id, bid_id, server_id, owner_email, amount, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'payment_pending', ?, ?)`)
         .bind(crypto.randomUUID().replaceAll("-", ""), auctionId, bid.id, bid.server_id, bid.owner_email, bid.amount, now, now),
-    ]);
+    );
   }
-  await db.prepare("UPDATE premium_auctions SET status = 'closed', finalized_at = ?, updated_at = ? WHERE id = ?")
-    .bind(now, now, auctionId).run();
-  await writeAudit(db, actorEmail, force ? "premium.auction.finalized_early" : "premium.auction.finalized", "premium_auction", auctionId, {
-    winnerCount: winners.length, slotCount: auction.slot_count, bids: eligible.results.length,
-  });
+  statements.push(
+    db.prepare(`UPDATE premium_auctions SET status = 'closed', finalized_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'closing' AND updated_at = ?`).bind(now, now, auctionId, now),
+    prepareAuditWrite(db, actorEmail, force ? "premium.auction.finalized_early" : "premium.auction.finalized",
+      "premium_auction", auctionId, {
+        winnerCount: winners.length,
+        slotCount: auction.slot_count,
+        bids: eligible.results.length,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+  );
+  const results = await db.batch(statements);
+  if ((results[results.length - 2].meta.changes ?? 0) !== 1) return false;
   return true;
 }
 
@@ -560,22 +596,37 @@ export async function confirmPremiumAward(db: D1Database, auctionId: string, awa
   if (!eligible) throw Response.json({ error: "낙찰 서버의 소유권·본인인증 상태가 변경되어 결제를 확정할 수 없습니다." }, { status: 409 });
   const status = now >= auction.target_starts_at && now < auction.target_ends_at ? "active" : "scheduled";
   const placementId = crypto.randomUUID().replaceAll("-", "");
-  await db.batch([
-    db.prepare(`UPDATE premium_awards SET status = ?, payment_confirmed_at = ?, payment_reference = ?, confirmed_by = ?, updated_at = ? WHERE id = ?`)
-      .bind(status, now, paymentReference, adminEmail, now, awardId),
-    db.prepare("UPDATE premium_bids SET status = 'winner', updated_at = ? WHERE id = ?").bind(now, award.bid_id),
+  const results = await db.batch([
+    db.prepare(`UPDATE premium_awards SET status = ?, payment_confirmed_at = ?, payment_reference = ?, confirmed_by = ?, updated_at = ?
+      WHERE id = ? AND auction_id = ? AND status = 'payment_pending'`)
+      .bind(status, now, paymentReference, adminEmail, now, awardId, auctionId),
+    prepareAuditWrite(db, adminEmail, "premium.award.payment_confirmed", "premium_award", awardId, {
+      auctionId,
+      serverId: award.server_id,
+      amount: award.amount,
+      startsAt: auction.target_starts_at,
+      endsAt: auction.target_ends_at,
+    }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    db.prepare(`UPDATE premium_bids SET status = 'winner', updated_at = ?
+      WHERE id = ? AND status = 'winner_pending'
+        AND EXISTS (SELECT 1 FROM premium_awards WHERE id = ? AND auction_id = ?
+          AND status = ? AND payment_confirmed_at = ? AND confirmed_by = ?)`)
+      .bind(now, award.bid_id, awardId, auctionId, status, now, adminEmail),
     db.prepare(`INSERT OR IGNORE INTO premium_placements
       (id, origin_key, auction_id, award_id, server_id, server_title, owner_email, source, amount, status,
         starts_at, ends_at, note, created_by, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'auction', ?, ?, ?, ?, ?, ?, ?, ?)`)
+      SELECT ?, ?, ?, ?, ?, ?, ?, 'auction', ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM premium_awards WHERE id = ? AND auction_id = ?
+        AND status = ? AND payment_confirmed_at = ? AND confirmed_by = ?)`)
       .bind(placementId, `award:${awardId}`, auctionId, awardId, award.server_id, eligible.title, award.owner_email,
         award.amount, status, auction.target_starts_at, auction.target_ends_at,
-        `주간 경매 낙찰 · ${award.amount.toLocaleString("ko-KR")}원`, adminEmail, now, now),
+        `주간 경매 낙찰 · ${award.amount.toLocaleString("ko-KR")}원`, adminEmail, now, now,
+        awardId, auctionId, status, now, adminEmail),
   ]);
+  if ((results[0].meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "다른 요청에서 이미 낙찰 상태가 변경되었습니다." }, { status: 409 });
+  }
   await synchronizePremiumPlacements(db, now);
-  await writeAudit(db, adminEmail, "premium.award.payment_confirmed", "premium_award", awardId, {
-    auctionId, serverId: award.server_id, amount: award.amount, startsAt: auction.target_starts_at, endsAt: auction.target_ends_at,
-  });
 }
 
 export async function forfeitPremiumAward(db: D1Database, auctionId: string, awardId: string, adminEmail: string) {
@@ -583,10 +634,19 @@ export async function forfeitPremiumAward(db: D1Database, auctionId: string, awa
   if (!award) throw Response.json({ error: "낙찰 정보를 찾을 수 없습니다." }, { status: 404 });
   if (award.status !== "payment_pending") throw Response.json({ error: "결제 대기 중인 낙찰만 포기 처리할 수 있습니다." }, { status: 409 });
   const now = unixNow();
-  await db.batch([
-    db.prepare("UPDATE premium_awards SET status = 'forfeited', updated_at = ?, confirmed_by = ? WHERE id = ?").bind(now, adminEmail, awardId),
-    db.prepare("UPDATE premium_bids SET status = 'forfeited', updated_at = ? WHERE id = ?").bind(now, award.bid_id),
+  const forfeited = await db.batch([
+    db.prepare(`UPDATE premium_awards SET status = 'forfeited', updated_at = ?, confirmed_by = ?
+      WHERE id = ? AND auction_id = ? AND status = 'payment_pending'`)
+      .bind(now, adminEmail, awardId, auctionId),
+    db.prepare(`UPDATE premium_bids SET status = 'forfeited', updated_at = ?
+      WHERE id = ? AND status = 'winner_pending'
+        AND EXISTS (SELECT 1 FROM premium_awards WHERE id = ? AND status = 'forfeited'
+          AND updated_at = ? AND confirmed_by = ?)`)
+      .bind(now, award.bid_id, awardId, now, adminEmail),
   ]);
+  if ((forfeited[0].meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "다른 요청에서 이미 낙찰 상태가 변경되었습니다." }, { status: 409 });
+  }
   const replacement = await db.prepare(`SELECT b.* FROM premium_bids b
     JOIN directory_servers d ON d.id = b.server_id JOIN bridge_servers bridge ON bridge.server_id = d.bridge_server_id
     JOIN user_accounts account ON account.email = b.owner_email
@@ -596,14 +656,20 @@ export async function forfeitPremiumAward(db: D1Database, auctionId: string, awa
     ORDER BY b.amount DESC, b.updated_at ASC LIMIT 1`).bind(auctionId).first<BidRow>();
   let replacementAwardId: string | null = null;
   if (replacement) {
-    replacementAwardId = crypto.randomUUID().replaceAll("-", "");
-    await db.batch([
-      db.prepare("UPDATE premium_bids SET status = 'winner_pending', updated_at = ? WHERE id = ?").bind(now, replacement.id),
+    const candidateAwardId = crypto.randomUUID().replaceAll("-", "");
+    const promoted = await db.batch([
+      db.prepare(`UPDATE premium_bids SET status = 'winner_pending', updated_at = ?
+        WHERE id = ? AND auction_id = ? AND status = 'loser'`)
+        .bind(now, replacement.id, auctionId),
       db.prepare(`INSERT INTO premium_awards
         (id, auction_id, bid_id, server_id, owner_email, amount, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'payment_pending', ?, ?)`)
-        .bind(replacementAwardId, auctionId, replacement.id, replacement.server_id, replacement.owner_email, replacement.amount, now, now),
+        SELECT ?, ?, ?, ?, ?, ?, 'payment_pending', ?, ?
+        WHERE changes() = 1`)
+        .bind(candidateAwardId, auctionId, replacement.id, replacement.server_id, replacement.owner_email, replacement.amount, now, now),
     ]);
+    if ((promoted[0].meta.changes ?? 0) === 1 && (promoted[1].meta.changes ?? 0) === 1) {
+      replacementAwardId = candidateAwardId;
+    }
   }
   await writeAudit(db, adminEmail, "premium.award.forfeited", "premium_award", awardId, {
     auctionId, serverId: award.server_id, replacementAwardId, replacementServerId: replacement?.server_id ?? null,
@@ -616,11 +682,19 @@ export async function cancelPremiumAuction(db: D1Database, auctionId: string, ad
   if (!auction) throw Response.json({ error: "경매를 찾을 수 없습니다." }, { status: 404 });
   if (!new Set(["scheduled", "open"]).has(auction.status)) throw Response.json({ error: "진행 전 또는 입찰 중인 경매만 취소할 수 있습니다." }, { status: 409 });
   const now = unixNow();
-  await db.batch([
-    db.prepare("UPDATE premium_auctions SET status = 'cancelled', updated_at = ? WHERE id = ?").bind(now, auctionId),
-    db.prepare("UPDATE premium_bids SET status = 'cancelled', updated_at = ? WHERE auction_id = ? AND status = 'active'").bind(now, auctionId),
+  const results = await db.batch([
+    db.prepare(`UPDATE premium_auctions SET status = 'cancelled', updated_at = ?
+      WHERE id = ? AND status IN ('scheduled', 'open')`).bind(now, auctionId),
+    prepareAuditWrite(db, adminEmail, "premium.auction.cancelled", "premium_auction", auctionId, {},
+      { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    db.prepare(`UPDATE premium_bids SET status = 'cancelled', updated_at = ?
+      WHERE auction_id = ? AND status = 'active'
+        AND EXISTS (SELECT 1 FROM premium_auctions WHERE id = ? AND status = 'cancelled' AND updated_at = ?)`)
+      .bind(now, auctionId, auctionId, now),
   ]);
-  await writeAudit(db, adminEmail, "premium.auction.cancelled", "premium_auction", auctionId, {});
+  if ((results[0].meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "다른 요청에서 이미 경매 상태가 변경되었습니다." }, { status: 409 });
+  }
 }
 
 export function assertAuctionOrigin(request: Request) {

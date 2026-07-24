@@ -21,6 +21,7 @@ type TicketRow = {
 };
 
 const TICKET_SECONDS = 45;
+export const CHAT_CONNECTION_SECONDS = 5 * 60;
 
 export async function chatRealtimeEnv() {
   return await directoryEnv() as ChatRealtimeEnvironment;

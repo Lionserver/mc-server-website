@@ -47,7 +47,11 @@ export async function POST(request: Request, context: RouteContext) {
         VALUES (?, ?, 'admin', ?, ?, ?)`).bind(id, serverId, session.email, body, now),
     ]);
     const message = { id, sender_role: "admin" as const, sender_email: session.email, body, created_at: now };
-    const realtime = await broadcastChatEvent(environment as ChatRealtimeEnvironment, { type: "chat.message", serverId, message }).catch(() => false);
+    const realtime = await broadcastChatEvent(environment as ChatRealtimeEnvironment, {
+      type: "chat.message",
+      serverId,
+      message: { ...message, sender_email: "" },
+    }).catch(() => false);
     await writeAudit(environment.DB, session.email, "conversation.message.sent", "server", serverId, { messageId: id, length: body.length });
     return Response.json({ message, realtime }, { status: 201 });
   } catch (error) {

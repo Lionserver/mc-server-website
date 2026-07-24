@@ -3,6 +3,7 @@ import { ensureAdminSchema } from "@/lib/admin-security";
 import { directoryEnv, directoryErrorResponse, ownerEmailFromRequest, type DirectoryServerRow } from "@/lib/server-directory";
 import { assertSameOrigin } from "@/lib/user-auth";
 import { broadcastDirectoryUpdate } from "@/lib/directory-realtime";
+import { assertRequestContentLength, assertStorageQuota, assertUploadAllowed } from "@/lib/request-guards";
 
 type RouteContext = { params: Promise<{ serverId: string }> | { serverId: string } };
 
@@ -82,12 +83,14 @@ export async function POST(request: Request, context: RouteContext) {
     const ownerEmail = await ownerEmailFromRequest(request);
     const environment = await directoryEnv();
     if (!environment.MEDIA) return Response.json({ error: "media storage is not configured" }, { status: 503 });
+    assertRequestContentLength(request, 32 * 1024 * 1024);
     await ensureAdminSchema(environment.DB);
     const server = await environment.DB.prepare("SELECT * FROM directory_servers WHERE id = ? AND deleted_at IS NULL")
       .bind(serverId).first<DirectoryServerRow>();
     if (!server) return Response.json({ error: "not found" }, { status: 404 });
     if (server.owner_email !== ownerEmail) return Response.json({ error: "forbidden" }, { status: 403 });
     if (server.owner_verification_status === "disputed") return Response.json({ error: "소유권 심사 중에는 이미지를 변경할 수 없습니다." }, { status: 423 });
+    await assertUploadAllowed(environment.DB, request, ownerEmail);
 
     const form = await request.formData();
     const kinds = Object.keys(assetSpecs) as AssetKind[];
@@ -101,7 +104,17 @@ export async function POST(request: Request, context: RouteContext) {
     const now = Math.floor(Date.now() / 1000);
     const statements = [];
     const previous = await environment.DB.prepare("SELECT kind, object_key FROM server_assets WHERE server_id = ?")
-      .bind(serverId).all<{ kind: AssetKind; object_key: string }>();
+      .bind(serverId).all<{ kind: AssetKind; object_key: string; size?: number }>();
+    const replacedRows = await environment.DB.prepare(`SELECT kind, size FROM server_assets
+      WHERE server_id = ? AND kind IN (${validated.map(() => "?").join(",")})`)
+      .bind(serverId, ...validated.map((asset) => asset.kind)).all<{ kind: AssetKind; size: number }>();
+    await assertStorageQuota(
+      environment.DB,
+      ownerEmail,
+      serverId,
+      validated.reduce((total, asset) => total + asset.file.size, 0),
+      replacedRows.results.reduce((total, asset) => total + Number(asset.size), 0),
+    );
     const previousKeys = new Map(previous.results.map((asset) => [asset.kind, asset.object_key]));
     const nextKeys = new Map<AssetKind, string>();
     try {

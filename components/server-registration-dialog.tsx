@@ -8,6 +8,7 @@ import { useRouter } from "next/navigation";
 import { ImageCropEditor, prepareImageCropSession, type ImageCropSession } from "@/components/image-crop-editor";
 import { ServerCategoryTags } from "@/components/server-category-tags";
 import { ServerDescriptionEditor, type DescriptionPosterUpload } from "@/components/server-description-editor";
+import { useTimedMotion } from "@/components/use-timed-motion";
 import { assetAccept, assetSizeLabel, assetSpecs, isMotionAssetType, motionAssetAutoFits, type AssetKind } from "@/lib/image-assets";
 import { descriptionPlainText, emptyDescriptionDocument, replaceDescriptionPosterIds, withoutDraftDescriptionPosters, type DescriptionDocument } from "@/lib/server-description";
 import { parseServerCategories } from "@/lib/server-categories";
@@ -18,6 +19,7 @@ type Props = {
   onCreated: (serverId: string) => void | Promise<void>;
   onMessage: (message: string) => void;
   loginReturnTo?: string;
+  returnFocusTo?: HTMLElement | null;
 };
 
 const initialStates = {
@@ -27,7 +29,7 @@ const initialStates = {
   mobileDetail: "선택 사항 · 미등록 시 기본 커버 자동 적용",
 } satisfies Partial<Record<AssetKind, string>>;
 
-export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMessage, loginReturnTo = "/?register=1" }: Props) {
+export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMessage, loginReturnTo = "/?register=1", returnFocusTo = null }: Props) {
   const router = useRouter();
   const [assetStates, setAssetStates] = useState(initialStates);
   const [assets, setAssets] = useState<Partial<Record<AssetKind, File>>>({});
@@ -39,6 +41,8 @@ export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMess
   const [saving, setSaving] = useState(false);
   const previewsRef = useRef<Partial<Record<AssetKind, string>>>({});
   const draftPostersRef = useRef<Record<string, { file: File; url: string }>>({});
+  const iconHasMotion = assets.icon?.type === "video/webm" || assets.icon?.type === "image/gif";
+  const iconMotionActive = useTimedMotion(iconHasMotion ? previews.icon : null);
 
   useEffect(() => () => {
     Object.values(previewsRef.current).forEach((url) => URL.revokeObjectURL(url));
@@ -206,7 +210,11 @@ export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMess
 
   return <>
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next) closeCrop(); onOpenChange(next); }}>
-      <Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="register-modal" aria-modal="true" aria-labelledby="register-title" onPointerDownOutside={(event) => event.preventDefault()} onInteractOutside={(event) => event.preventDefault()}>
+      <Dialog.Portal><Dialog.Overlay className="modal-backdrop" /><Dialog.Content className="register-modal" aria-modal="true" aria-labelledby="register-title" onPointerDownOutside={(event) => event.preventDefault()} onInteractOutside={(event) => event.preventDefault()} onCloseAutoFocus={(event) => {
+        if (!returnFocusTo?.isConnected) return;
+        event.preventDefault();
+        returnFocusTo.focus();
+      }}>
         <Dialog.Close asChild><button className="modal-close" type="button" aria-label="등록 닫기"><X size={18} /></button></Dialog.Close>
         <div className="register-head"><span>SERVER ONBOARDING / 01</span><Dialog.Title asChild><h2 id="register-title">새 서버 등록</h2></Dialog.Title><Dialog.Description asChild><p>이미지는 어떤 크기든 선택하면 규격에 맞춰 실시간 크롭할 수 있습니다. 건너뛰면 Minecraft.kr 기본 비주얼이 적용됩니다.</p></Dialog.Description></div>
         <form onSubmit={submit}>
@@ -215,9 +223,9 @@ export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMess
           <div className="form-grid three"><label><span>에디션</span><select name="edition" defaultValue="JE"><option value="JE">Java Edition</option><option value="BE">Bedrock Edition</option><option value="JE + BE">Java + Bedrock</option></select></label><label><span>최소 버전</span><input name="minVersion" maxLength={24} defaultValue="1.21.4" required /></label><label><span>최대 버전</span><input name="maxVersion" maxLength={24} defaultValue="1.21.8" required /></label></div>
           <div className="form-grid address"><label><span>서버 주소</span><input name="address" required placeholder="play.example.kr" /></label><label><span>포트</span><input name="port" type="number" min={1} max={65535} defaultValue={25565} required /></label></div>
           <div className="registration-category-row"><ServerCategoryTags value={categories} onChange={setCategories} disabled={saving} idPrefix="registration" /><div className="form-helper"><b>주소는 등록 후 잠금</b><p>도메인은 고정되며 운영자센터에서 표시 대소문자만 바꿀 수 있습니다.</p></div></div>
-          <div className="icon-upload-row"><label className={assetStates.icon?.startsWith("✓") ? "upload-box icon-upload valid has-preview" : "upload-box icon-upload"}><input name="icon" type="file" accept={assetAccept("icon")} onChange={(event) => void chooseAsset("icon", event.target.files?.[0])} /><span className={`upload-visual square${previews.icon ? " preview" : ""}`}>{previews.icon ? <>{assets.icon?.type === "video/webm" ? <video src={previews.icon} autoPlay loop muted playsInline aria-label="서버 아이콘 WebM 미리보기" /> : <img src={previews.icon} alt="서버 아이콘 GIF·이미지 미리보기" />}<em className="upload-preview-badge">PREVIEW</em></> : <><b>256</b><small>× 256</small></>}</span><strong>{previews.icon ? "서버 아이콘 · 저장 준비 완료" : "서버 아이콘 · 자동 크롭"}</strong><small>{assetStates.icon}</small></label><div><b>정지 이미지·GIF·WebM 사용 가능</b><p>원본 크기와 무관하게 256×256 정사각형에 맞추며, 움직이는 아이콘도 실시간으로 미리봅니다.</p></div></div>
-          <section className="asset-upload-section shared-list-upload" aria-labelledby="list-banner-upload-title"><div className="asset-upload-heading"><span>LIST PROMOTION</span><div><b id="list-banner-upload-title">PC·모바일 공용 목록 배너</b><p>468×60 한 장이 데스크톱과 모바일 서버 리스트에 동일하게 노출됩니다.</p></div></div><div className="upload-grid banner-upload-grid"><BannerUpload kind="desktopList" title="공용 목록 배너" state={assetStates.desktopList ?? ""} width={468} height={60} previewUrl={previews.desktopList} previewType={assets.desktopList?.type} onSelect={chooseAsset} /></div></section>
-          <section className="asset-upload-section detail-cover-upload" aria-labelledby="detail-cover-upload-title"><div className="asset-upload-heading"><span>DETAIL COVER</span><div><b id="detail-cover-upload-title">상세 상단 커버</b><p>서버 상세보기 맨 위에만 쓰는 별도 이미지입니다. PC 1440×480 / 모바일 750×500.</p></div></div><div className="upload-grid banner-upload-grid"><BannerUpload kind="desktopDetail" title="PC 상세 커버" state={assetStates.desktopDetail ?? ""} width={1440} height={480} previewUrl={previews.desktopDetail} previewType={assets.desktopDetail?.type} onSelect={chooseAsset} /><BannerUpload kind="mobileDetail" title="모바일 상세 커버" state={assetStates.mobileDetail ?? ""} width={750} height={500} previewUrl={previews.mobileDetail} previewType={assets.mobileDetail?.type} onSelect={chooseAsset} /></div></section>
+          <div className="icon-upload-row"><label className={assetStates.icon?.startsWith("✓") ? "upload-box icon-upload valid has-preview" : "upload-box icon-upload"}><input name="icon" type="file" accept={assetAccept("icon")} aria-label="서버 아이콘 파일 선택" onChange={(event) => void chooseAsset("icon", event.target.files?.[0])} /><span className={`upload-visual square${previews.icon ? " preview" : ""}`}>{previews.icon ? <>{assets.icon?.type === "video/webm" ? iconMotionActive ? <video className="motion-media" src={previews.icon} autoPlay loop muted playsInline aria-label={`${assets.icon.name} 서버 아이콘 WebM 미리보기`} /> : <span className="motion-preview-stopped">움직임 미리보기 정지</span> : assets.icon?.type === "image/gif" ? iconMotionActive ? <img className="motion-media" src={previews.icon} alt={`${assets.icon.name} 서버 아이콘 GIF 미리보기`} /> : <span className="motion-preview-stopped">움직임 미리보기 정지</span> : <img src={previews.icon} alt={`${assets.icon?.name ?? "선택한 파일"} 서버 아이콘 미리보기`} />}<em className="upload-preview-badge">PREVIEW</em></> : <><b>256</b><small>× 256</small></>}</span><strong>{previews.icon ? "서버 아이콘 · 저장 준비 완료" : "서버 아이콘 · 자동 크롭"}</strong><small>{assetStates.icon}</small></label><div><b>정지 이미지·GIF·WebM 사용 가능</b><p>원본 크기와 무관하게 256×256 정사각형에 맞추며, 움직이는 미리보기는 5초 뒤 자동으로 멈춥니다.</p></div></div>
+          <section className="asset-upload-section shared-list-upload" aria-labelledby="list-banner-upload-title"><div className="asset-upload-heading"><span>LIST PROMOTION</span><div><b id="list-banner-upload-title">PC·모바일 공용 목록 배너</b><p>468×60 한 장이 데스크톱과 모바일 서버 리스트에 동일하게 노출됩니다.</p></div></div><div className="upload-grid banner-upload-grid"><BannerUpload kind="desktopList" title="공용 목록 배너" state={assetStates.desktopList ?? ""} width={468} height={60} previewUrl={previews.desktopList} previewType={assets.desktopList?.type} previewName={assets.desktopList?.name} onSelect={chooseAsset} /></div></section>
+          <section className="asset-upload-section detail-cover-upload" aria-labelledby="detail-cover-upload-title"><div className="asset-upload-heading"><span>DETAIL COVER</span><div><b id="detail-cover-upload-title">상세 상단 커버</b><p>서버 상세보기 맨 위에만 쓰는 별도 이미지입니다. PC 1440×480 / 모바일 750×500.</p></div></div><div className="upload-grid banner-upload-grid"><BannerUpload kind="desktopDetail" title="PC 상세 커버" state={assetStates.desktopDetail ?? ""} width={1440} height={480} previewUrl={previews.desktopDetail} previewType={assets.desktopDetail?.type} previewName={assets.desktopDetail?.name} onSelect={chooseAsset} /><BannerUpload kind="mobileDetail" title="모바일 상세 커버" state={assetStates.mobileDetail ?? ""} width={750} height={500} previewUrl={previews.mobileDetail} previewType={assets.mobileDetail?.type} previewName={assets.mobileDetail?.name} onSelect={chooseAsset} /></div></section>
           <button className="submit-register" type="submit" disabled={saving}>{saving ? "서버 등록 중…" : "서버 등록 후 MOTD 인증 계속하기"}</button>
         </form>
       </Dialog.Content></Dialog.Portal>
@@ -226,9 +234,12 @@ export function ServerRegistrationDialog({ open, onOpenChange, onCreated, onMess
   </>;
 }
 
-function BannerUpload({ kind, title, state, width, height, previewUrl, previewType, onSelect }: { kind: Exclude<AssetKind, "icon">; title: string; state: string; width: number; height: number; previewUrl?: string; previewType?: string; onSelect: (kind: AssetKind, file?: File) => Promise<void> }) {
+function BannerUpload({ kind, title, state, width, height, previewUrl, previewType, previewName, onSelect }: { kind: Exclude<AssetKind, "icon">; title: string; state: string; width: number; height: number; previewUrl?: string; previewType?: string; previewName?: string; onSelect: (kind: AssetKind, file?: File) => Promise<void> }) {
   const motionGuide = motionAssetAutoFits(kind)
     ? `GIF·WebM 원본 크기 자동 맞춤 · 최대 ${assetSizeLabel(kind)}`
     : `GIF·WebM ${width}×${height} 완성본 · 최대 ${assetSizeLabel(kind)}`;
-  return <label className={state.startsWith("✓") ? "upload-box banner-upload valid has-preview" : "upload-box banner-upload"}><input name={kind} type="file" accept={assetAccept(kind)} onChange={(event) => void onSelect(kind, event.target.files?.[0])} /><span className={`upload-visual wide${previewUrl ? " preview" : ""}`} style={{ aspectRatio: `${width}/${height}` }}>{previewUrl ? <>{previewType === "video/webm" ? <video src={previewUrl} autoPlay loop muted playsInline aria-label={`${title} WebM 결과 미리보기`} /> : <img src={previewUrl} alt={`${title} 결과 미리보기`} />}<em className="upload-preview-badge">PREVIEW</em></> : <><b>{width}</b><small>× {height}</small></>}</span><strong>{title} · {previewUrl ? "저장 준비 완료" : "자동 크롭"}</strong><small>{state} · 정지 이미지는 원본 크기 무관 · {motionGuide}</small></label>;
+  const hasMotion = previewType === "video/webm" || previewType === "image/gif";
+  const motionActive = useTimedMotion(hasMotion ? previewUrl : null);
+  const previewLabel = `${previewName ?? "선택한 파일"} · ${title} 미리보기`;
+  return <label className={state.startsWith("✓") ? "upload-box banner-upload valid has-preview" : "upload-box banner-upload"}><input name={kind} type="file" accept={assetAccept(kind)} aria-label={`${title} 파일 선택`} onChange={(event) => void onSelect(kind, event.target.files?.[0])} /><span className={`upload-visual wide${previewUrl ? " preview" : ""}`} style={{ aspectRatio: `${width}/${height}` }}>{previewUrl ? <>{previewType === "video/webm" ? motionActive ? <video className="motion-media" src={previewUrl} autoPlay loop muted playsInline aria-label={`${previewLabel} WebM`} /> : <span className="motion-preview-stopped">움직임 미리보기 정지</span> : previewType === "image/gif" ? motionActive ? <img className="motion-media" src={previewUrl} alt={`${previewLabel} GIF`} /> : <span className="motion-preview-stopped">움직임 미리보기 정지</span> : <img src={previewUrl} alt={previewLabel} />}<em className="upload-preview-badge">PREVIEW</em></> : <><b>{width}</b><small>× {height}</small></>}</span><strong>{title} · {previewUrl ? "저장 준비 완료" : "자동 크롭"}</strong><small>{state} · 정지 이미지는 원본 크기 무관 · {motionGuide}</small></label>;
 }

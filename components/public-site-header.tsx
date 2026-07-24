@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { LogIn, Menu, Moon, ShieldCheck, Sun, X } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
 export type PublicHeaderTheme = "light" | "dark";
 export type PublicDirectoryView = "all" | "small" | "new";
@@ -31,8 +31,9 @@ type DirectoryLinkProps = {
 function DirectoryLink({ active, view, className, children, onDirectoryViewChange, onNavigate }: DirectoryLinkProps) {
   const href = view === "all" ? "/#server-list" : `/?view=${view}#server-list`;
   const combinedClass = [active === view ? "active" : "", className].filter(Boolean).join(" ");
-  if (!onDirectoryViewChange) return <Link className={combinedClass || undefined} href={href} onClick={onNavigate}>{children}</Link>;
-  return <a className={combinedClass || undefined} href={href} onClick={(event) => {
+  const ariaCurrent = active === view ? "page" : undefined;
+  if (!onDirectoryViewChange) return <Link className={combinedClass || undefined} href={href} aria-current={ariaCurrent} onClick={onNavigate}>{children}</Link>;
+  return <a className={combinedClass || undefined} href={href} aria-current={ariaCurrent} onClick={(event) => {
     event.preventDefault();
     onDirectoryViewChange(view);
     onNavigate();
@@ -44,15 +45,28 @@ export function PublicSiteHeader({
   onMobileOpenChange, onToggleTheme, onRegister, onDirectoryViewChange,
 }: PublicSiteHeaderProps) {
   const closeMobile = () => onMobileOpenChange(false);
+  const mobileButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onMobileOpenChange(false);
+      window.requestAnimationFrame(() => mobileButtonRef.current?.focus());
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileOpen, onMobileOpenChange]);
 
   return <header className="site-header">
     <div className="container header-inner">
       <Link className="brand header-brand" href={active === "broadcasts" ? "/#top" : "#top"} aria-label="MINECRAFT SERVER LIST 홈" onClick={closeMobile}><span>MINECRAFT SERVER LIST</span></Link>
-      <nav className={mobileOpen ? "main-nav open" : "main-nav"} aria-label="주요 메뉴">
+      <nav id="public-primary-navigation" className={mobileOpen ? "main-nav open" : "main-nav"} aria-label="주요 메뉴">
         <DirectoryLink active={active} view="all" onDirectoryViewChange={onDirectoryViewChange} onNavigate={closeMobile}>전체 서버</DirectoryLink>
         <DirectoryLink active={active} view="small" className="small-directory-link" onDirectoryViewChange={onDirectoryViewChange} onNavigate={closeMobile}>소규모 서버 <span>20↓</span></DirectoryLink>
         <DirectoryLink active={active} view="new" className="new-directory-link" onDirectoryViewChange={onDirectoryViewChange} onNavigate={closeMobile}>신규 서버 <span>7D</span></DirectoryLink>
-        <Link className={`${active === "broadcasts" ? "active " : ""}broadcast-directory-link`} href="/broadcasts" onClick={closeMobile}>마크 방송 <span>LIVE</span></Link>
+        <Link className={`${active === "broadcasts" ? "active " : ""}broadcast-directory-link`} href="/broadcasts" aria-current={active === "broadcasts" ? "page" : undefined} onClick={closeMobile}>마크 방송 <span>LIVE</span></Link>
         <Link href="/operator" onClick={closeMobile}>운영자 센터</Link>
         <button className="nav-register" type="button" onClick={() => { onRegister(); closeMobile(); }}>서버 등록</button>
       </nav>
@@ -68,7 +82,7 @@ export function PublicSiteHeader({
           {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
           <span>{theme === "light" ? "DARK" : "LIGHT"}</span>
         </button>
-        <button className="mobile-menu-button" type="button" aria-label="메뉴 열기" aria-expanded={mobileOpen} onClick={() => onMobileOpenChange(!mobileOpen)}>
+        <button ref={mobileButtonRef} className="mobile-menu-button" type="button" aria-label={mobileOpen ? "메뉴 닫기" : "메뉴 열기"} aria-controls="public-primary-navigation" aria-expanded={mobileOpen} onClick={() => onMobileOpenChange(!mobileOpen)}>
           {mobileOpen ? <X size={19} aria-hidden="true" /> : <Menu size={20} aria-hidden="true" />}
         </button>
       </div>

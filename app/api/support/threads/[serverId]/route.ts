@@ -29,7 +29,14 @@ export async function GET(request: Request, context: RouteContext) {
       await environment.DB.prepare("UPDATE admin_conversations SET unread_owner = 0, updated_at = ? WHERE server_id = ?")
         .bind(Math.floor(Date.now() / 1000), server.id).run();
     }
-    return Response.json({ server, messages: messages.results, unreadOwner: markRead ? 0 : conversation?.unread_owner ?? 0 }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({
+      server,
+      messages: messages.results.map((message) => ({
+        ...message as Record<string, unknown>,
+        sender_email: "",
+      })),
+      unreadOwner: markRead ? 0 : conversation?.unread_owner ?? 0,
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return adminErrorResponse(error);
   }

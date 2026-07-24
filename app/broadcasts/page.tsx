@@ -4,9 +4,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, ExternalLink, Eye, Radio, RefreshCw, Tv } from "lucide-react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { PublicSiteHeader } from "@/components/public-site-header";
-import { ServerRegistrationDialog } from "@/components/server-registration-dialog";
 import { readThemePreference, storeThemePreference } from "@/lib/browser-preferences.mjs";
 import {
   STREAM_PREVIEW_CACHE_SECONDS, STREAM_PROFILE_CACHE_SECONDS, type MinecraftLiveStream, type MinecraftStreamsPayload, type StreamPlatform,
@@ -16,6 +16,10 @@ type ThemeMode = "light" | "dark";
 type PlatformFilter = "all" | StreamPlatform;
 
 const viewers = new Intl.NumberFormat("ko-KR");
+const ServerRegistrationDialog = dynamic(
+  () => import("@/components/server-registration-dialog").then((module) => module.ServerRegistrationDialog),
+  { ssr: false },
+);
 
 export default function MinecraftBroadcastsPage() {
   const router = useRouter();
@@ -30,6 +34,7 @@ export default function MinecraftBroadcastsPage() {
   const [ownerSessionChecked, setOwnerSessionChecked] = useState(false);
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [toast, setToast] = useState("");
+  const [registrationReturnFocusTo, setRegistrationReturnFocusTo] = useState<HTMLElement | null>(null);
 
   const load = useCallback(async (quiet = false) => {
     if (quiet) setRefreshing(true); else setLoading(true);
@@ -115,6 +120,7 @@ export default function MinecraftBroadcastsPage() {
       router.push(`/login?returnTo=${encodeURIComponent("/broadcasts?register=1")}`);
       return;
     }
+    setRegistrationReturnFocusTo(document.activeElement instanceof HTMLElement ? document.activeElement : null);
     setRegistrationOpen(true);
     setMobileOpen(false);
   }
@@ -154,28 +160,28 @@ export default function MinecraftBroadcastsPage() {
             <button type="button" disabled={refreshing} onClick={() => void load(true)}><RefreshCw size={14} className={refreshing ? "spin" : ""} /> {refreshing ? "갱신 중" : "새로고침"}</button>
           </div>
 
-          <div className="broadcast-source-bar" aria-label="방송 플랫폼 필터">
-            <button type="button" className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>전체 <b>{payload?.streams.length ?? 0}</b></button>
-            <button type="button" className={filter === "chzzk" ? "active chzzk" : "chzzk"} onClick={() => setFilter("chzzk")}>치지직 <b>{chzzkCount}</b></button>
-            <button type="button" className={filter === "soop" ? "active soop" : "soop"} onClick={() => setFilter("soop")}>SOOP <b>{soopCount}</b></button>
+          <div className="broadcast-source-bar" role="group" aria-label="방송 플랫폼 필터">
+            <button type="button" className={filter === "all" ? "active" : ""} aria-pressed={filter === "all"} onClick={() => setFilter("all")}>전체 <b>{payload?.streams.length ?? 0}</b></button>
+            <button type="button" className={filter === "chzzk" ? "active chzzk" : "chzzk"} aria-pressed={filter === "chzzk"} onClick={() => setFilter("chzzk")}>치지직 <b>{chzzkCount}</b></button>
+            <button type="button" className={filter === "soop" ? "active soop" : "soop"} aria-pressed={filter === "soop"} onClick={() => setFilter("soop")}>SOOP <b>{soopCount}</b></button>
             <span>{payload ? `마지막 확인 ${new Date(payload.generatedAt * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : "라이브 목록 연결 확인 중"}</span>
           </div>
 
-          {error ? <div className="broadcast-empty error"><Activity size={25} /><h3>방송 목록 연결이 지연되고 있습니다</h3><p>{error}</p><button type="button" onClick={() => void load()}>다시 확인</button></div>
-            : loading ? <div className="broadcast-grid" aria-label="방송 목록을 불러오는 중">{Array.from({ length: 6 }, (_, index) => <div className="broadcast-card-skeleton" key={index}><span /><i /><i /></div>)}</div>
+          {error ? <div className="broadcast-empty error" role="alert"><Activity size={25} /><h3>방송 목록 연결이 지연되고 있습니다</h3><p>{error}</p><button type="button" onClick={() => void load()}>다시 확인</button></div>
+            : loading ? <div className="broadcast-grid" role="status" aria-label="방송 목록을 불러오는 중" aria-busy="true">{Array.from({ length: 6 }, (_, index) => <div className="broadcast-card-skeleton" key={index}><span /><i /><i /></div>)}</div>
               : filtered.length ? <div className="broadcast-grid">{filtered.map((stream) => <StreamCard
                   stream={stream}
                   previewVersion={Math.floor((payload?.generatedAt ?? 0) / STREAM_PREVIEW_CACHE_SECONDS)}
                   profileVersion={Math.floor((payload?.generatedAt ?? 0) / STREAM_PROFILE_CACHE_SECONDS)}
                   key={stream.id}
                 />)}</div>
-                : <div className="broadcast-empty"><Tv size={28} /><h3>현재 방송 중인 마인크래프트 채널이 없습니다</h3><p>마인크래프트 카테고리 방송이 시작되면 최대 60초 안에 이곳에 표시됩니다.</p></div>}
+                : <div className="broadcast-empty" role="status"><Tv size={28} /><h3>현재 방송 중인 마인크래프트 채널이 없습니다</h3><p>마인크래프트 카테고리 방송이 시작되면 최대 60초 안에 이곳에 표시됩니다.</p></div>}
         </div>
       </section>
     </main>
 
     <footer className="broadcast-footer"><div className="container"><span>MINECRAFT.KR · LIVE DIRECTORY</span><p>방송 정보와 이미지는 각 플랫폼의 공개 라이브 목록에서 확인하며, 시청은 해당 플랫폼에서 진행됩니다.</p><Link href="/">서버 목록으로 돌아가기</Link></div></footer>
-    <ServerRegistrationDialog open={registrationOpen} onOpenChange={setRegistrationOpen} loginReturnTo="/broadcasts?register=1" onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => router.push(`/operator?created=${serverId}`), 450); }} />
+    <ServerRegistrationDialog open={registrationOpen} returnFocusTo={registrationReturnFocusTo} onOpenChange={setRegistrationOpen} loginReturnTo="/broadcasts?register=1" onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => router.push(`/operator?created=${serverId}`), 450); }} />
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>;
 }

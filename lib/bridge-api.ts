@@ -38,6 +38,7 @@ export async function bridgeEnv(): Promise<BridgeEnv> {
 }
 
 export async function ensureBridgeSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   const statements = [
     `CREATE TABLE IF NOT EXISTS bridge_servers (
       server_id TEXT PRIMARY KEY NOT NULL,
@@ -157,7 +158,10 @@ export async function authenticateBridgeRequest(request: Request, body: string) 
 export function errorResponse(error: unknown) {
   if (error instanceof Response) return error;
   const message = error instanceof Error ? error.message : "unexpected error";
-  return Response.json({ error: message }, { status: 500 });
+  console.error("bridge request failed", error);
+  return Response.json({
+    error: process.env.NODE_ENV === "production" ? "브리지 요청을 처리하지 못했습니다." : message,
+  }, { status: 500 });
 }
 
 export function boundedInteger(value: unknown, name: string, maximum = 10_000_000) {

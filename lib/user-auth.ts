@@ -1,4 +1,5 @@
 import { directoryEnv, type DirectoryEnv } from "@/lib/server-directory";
+import { assertEmailCodeRequestAllowed } from "@/lib/request-guards";
 
 export interface UserAuthEnvironment extends DirectoryEnv {
   AUTH_CODE_SECRET?: string;
@@ -6,11 +7,12 @@ export interface UserAuthEnvironment extends DirectoryEnv {
   RESEND_API_KEY?: string;
   AUTH_EMAIL_FROM?: string;
   ADMIN_EMAIL?: string;
+  SITES_AUTH_ENABLED?: string;
 }
 
-export type OwnerSession = { accountId: string; email: string; expiresAt: number };
+export type OwnerSession = { accountId: string; email: string; expiresAt: number; authMode: "email" | "sites" };
 
-const OWNER_COOKIE = "mkr_owner_session";
+export const OWNER_COOKIE = "mkr_owner_session";
 const CODE_SECONDS = 10 * 60;
 const SESSION_SECONDS = 30 * 24 * 60 * 60;
 const MAX_CODE_ATTEMPTS = 5;
@@ -20,6 +22,7 @@ export async function userAuthEnv() {
 }
 
 export async function ensureUserAuthSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS user_accounts (
       id TEXT PRIMARY KEY NOT NULL,
@@ -80,14 +83,9 @@ export async function requestEmailCode(request: Request, payload: unknown) {
   const environment = await userAuthEnv();
   await ensureUserAuthSchema(environment.DB);
   const now = unixNow();
-  const fingerprint = await requestFingerprint(request, email);
-  const ipHash = await requestIpHash(request);
-  const recent = await environment.DB.prepare(`SELECT COUNT(*) count FROM user_login_codes
-    WHERE request_fingerprint = ? AND created_at > ?`).bind(fingerprint, now - 600).first<{ count: number }>();
-  if ((recent?.count ?? 0) >= 3) throw Response.json({ error: "인증 코드 요청이 너무 많습니다. 10분 후 다시 시도해 주세요." }, { status: 429 });
-  const recentFromIp = await environment.DB.prepare(`SELECT COUNT(*) count FROM user_login_codes
-    WHERE request_ip_hash = ? AND created_at > ?`).bind(ipHash, now - 600).first<{ count: number }>();
-  if ((recentFromIp?.count ?? 0) >= 10) throw Response.json({ error: "이 네트워크에서 인증 코드 요청이 너무 많습니다. 10분 후 다시 시도해 주세요." }, { status: 429 });
+  const fingerprint = await requestFingerprint(environment, request, email);
+  const ipHash = await requestIpHash(environment, request);
+  await assertEmailCodeRequestAllowed(environment.DB, request, email);
 
   const id = crypto.randomUUID().replaceAll("-", "");
   const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
@@ -156,7 +154,7 @@ export async function verifyEmailCode(request: Request, payload: unknown) {
       .bind(tokenHash, accountId, email, now + SESSION_SECONDS, now, now),
   ]);
   return {
-    session: { accountId, email, expiresAt: now + SESSION_SECONDS },
+    session: { accountId, email, expiresAt: now + SESSION_SECONDS, authMode: "email" as const },
     cookie: ownerCookie(request, sessionToken, SESSION_SECONDS),
   };
 }
@@ -166,24 +164,50 @@ export async function getOwnerSession(request: Request): Promise<OwnerSession | 
   return getOwnerSessionFromDb(environment.DB, request);
 }
 
+export function hasOwnerSessionCookie(request: Request) {
+  return Boolean(cookieValue(request.headers.get("cookie") ?? "", OWNER_COOKIE));
+}
+
 export async function getOwnerSessionFromDb(db: D1Database, request: Request): Promise<OwnerSession | null> {
   const token = cookieValue(request.headers.get("cookie") ?? "", OWNER_COOKIE);
-  if (!token || token.length < 32 || token.length > 160) return null;
-  await ensureUserAuthSchema(db);
   const now = unixNow();
-  const tokenHash = await sha256Hex(token);
-  const row = await db.prepare(`SELECT account_id, email, expires_at, last_seen_at FROM user_sessions
-    WHERE token_hash = ? AND expires_at > ?`).bind(tokenHash, now)
-    .first<{ account_id: string; email: string; expires_at: number; last_seen_at: number }>();
-  if (!row) return null;
-  if (row.last_seen_at < now - 60) {
-    await db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
+  if (token && token.length >= 32 && token.length <= 160) {
+    await ensureUserAuthSchema(db);
+    const tokenHash = await sha256Hex(token);
+    const row = await db.prepare(`SELECT account_id, email, expires_at, last_seen_at FROM user_sessions
+      WHERE token_hash = ? AND expires_at > ?`).bind(tokenHash, now)
+      .first<{ account_id: string; email: string; expires_at: number; last_seen_at: number }>();
+    if (row) {
+      if (row.last_seen_at < now - 60) {
+        await db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE token_hash = ?").bind(now, tokenHash).run();
+      }
+      return { accountId: row.account_id, email: row.email, expiresAt: row.expires_at, authMode: "email" };
+    }
   }
-  return { accountId: row.account_id, email: row.email, expiresAt: row.expires_at };
+  const platformEmail = trustedPlatformUserEmail(request);
+  if (!platformEmail) return null;
+  await ensureUserAuthSchema(db);
+  const existing = await db.prepare("SELECT id FROM user_accounts WHERE email = ?").bind(platformEmail).first<{ id: string }>();
+  let accountId = existing?.id;
+  if (!accountId) {
+    const proposedId = crypto.randomUUID().replaceAll("-", "");
+    await db.prepare(`INSERT INTO user_accounts
+      (id, email, email_verified_at, last_login_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO NOTHING`)
+      .bind(proposedId, platformEmail, now, now, now, now).run();
+    accountId = (await db.prepare("SELECT id FROM user_accounts WHERE email = ?").bind(platformEmail).first<{ id: string }>())?.id;
+  }
+  if (!accountId) return null;
+  return { accountId, email: platformEmail, expiresAt: now + 5 * 60, authMode: "sites" };
 }
 
 export async function resolveOwnerSessionEmail(db: D1Database, request: Request) {
   return (await getOwnerSessionFromDb(db, request))?.email ?? null;
+}
+
+export function trustedPlatformUserEmail(request: Request) {
+  const email = request.headers.get("oai-authenticated-user-email")?.trim().toLowerCase() ?? "";
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254 ? email : null;
 }
 
 export async function logoutOwner(request: Request) {
@@ -228,20 +252,24 @@ export function normalizeEmail(value: unknown) {
 }
 
 async function authCodeHash(environment: UserAuthEnvironment, id: string, email: string, code: string) {
+  return authHmacHex(environment, `code|${id}:${email}:${code}`);
+}
+
+async function authHmacHex(environment: UserAuthEnvironment, value: string) {
   const secret = environment.AUTH_CODE_SECRET;
   if (!secret || secret.length < 24) throw Response.json({ error: "인증 보안 설정이 준비되지 않았습니다." }, { status: 503 });
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return toHex(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}:${email}:${code}`)));
+  return toHex(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
 }
 
-async function requestFingerprint(request: Request, email: string) {
+async function requestFingerprint(environment: UserAuthEnvironment, request: Request, email: string) {
   const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0] ?? "local";
-  return sha256Hex(`${ip.trim()}|${email}`);
+  return authHmacHex(environment, `request|${ip.trim()}|${email}`);
 }
 
-async function requestIpHash(request: Request) {
+async function requestIpHash(environment: UserAuthEnvironment, request: Request) {
   const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0] ?? "local";
-  return sha256Hex(ip.trim());
+  return authHmacHex(environment, `ip|${ip.trim()}`);
 }
 
 function ownerCookie(request: Request, token: string, maxAge: number) {

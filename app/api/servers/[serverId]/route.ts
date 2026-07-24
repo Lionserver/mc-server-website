@@ -10,6 +10,7 @@ import { ensurePublicDirectorySchema, normalizePublicUrl, parseStaffProfiles, pu
 import { broadcastDirectoryUpdate } from "@/lib/directory-realtime";
 import { descriptionPlainText, descriptionPosterIds, parseDescriptionDocument } from "@/lib/server-description";
 import { MinecraftProfileLookupError, resolveMinecraftProfiles } from "@/lib/minecraft-profile";
+import { ensureOperatorChannelSchema } from "@/lib/operator-channel";
 
 type RouteContext = { params: Promise<{ serverId: string }> | { serverId: string } };
 
@@ -167,7 +168,9 @@ export async function DELETE(request: Request, context: RouteContext) {
     const ownerEmail = await ownerEmailFromRequest(request);
     const payload = await request.json().catch(() => ({})) as { confirmation?: unknown };
     const environment = await directoryEnv();
+    await ensurePublicDirectorySchema(environment.DB);
     await ensureOwnershipSchema(environment.DB);
+    await ensureOperatorChannelSchema(environment.DB);
     const existing = await environment.DB.prepare("SELECT * FROM directory_servers WHERE id = ? AND deleted_at IS NULL")
       .bind(id).first<DirectoryServerRow>();
     if (!existing) return Response.json({ error: "not found" }, { status: 404 });

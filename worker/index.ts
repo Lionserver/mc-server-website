@@ -1,10 +1,11 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { consumeChatRealtimeTicket, realtimeRoomName } from "../lib/chat-realtime";
+import { CHAT_CONNECTION_SECONDS, consumeChatRealtimeTicket, realtimeRoomName } from "../lib/chat-realtime";
 import { cleanupBroadcastImageCache } from "../lib/minecraft-stream-cache";
-import { collectPublicStatusSnapshots } from "../lib/public-directory";
-import { resolveOwnerSessionEmail } from "../lib/user-auth";
+import { collectPublicStatusSnapshots, refreshPublicDirectoryInBackground } from "../lib/public-directory";
+import { hasOwnerSessionCookie, resolveOwnerSessionEmail, trustedPlatformUserEmail } from "../lib/user-auth";
+import { cleanupExpiredApplicationData } from "../lib/maintenance";
 export { ChatRoom } from "./chat-room";
 export { DirectoryLive } from "./directory-live";
 
@@ -41,11 +42,22 @@ interface ExecutionContext {
 const worker = {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(collectPublicStatusSnapshots(env.DB));
+    ctx.waitUntil(cleanupExpiredApplicationData(env.DB));
     if (env.MEDIA) ctx.waitUntil(cleanupBroadcastImageCache(env.MEDIA));
   },
 
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/api/servers" && shouldRunDirectoryMaintenance()) {
+      ctx.waitUntil(refreshPublicDirectoryInBackground(env.DB).catch((error) => {
+        console.error("directory background maintenance failed", error);
+      }));
+      if (shouldRunPrivacyCleanup()) {
+        ctx.waitUntil(cleanupExpiredApplicationData(env.DB).catch((error) => {
+          console.error("privacy retention cleanup failed", error);
+        }));
+      }
+    }
 
     if (url.pathname === "/api/realtime/chat") {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("websocket upgrade required", { status: 426 });
@@ -57,6 +69,13 @@ const worker = {
       if ((ticket.role === "admin" && ticket.scope !== "global") || (ticket.role === "owner" && !validOwnerScope)) {
         return new Response("invalid realtime scope", { status: 403 });
       }
+      if (ticket.role === "owner") {
+        const authorized = await env.DB.prepare(`SELECT 1 authorized FROM directory_servers
+          WHERE id = ? AND owner_email = ? AND deleted_at IS NULL
+            AND (? <> 'operators' OR status = 'active' AND owner_verification_status = 'verified')
+          LIMIT 1`).bind(ticket.server_id, ticket.principal_email, ticket.scope).first();
+        if (!authorized) return new Response("realtime authorization changed", { status: 403 });
+      }
       const roomName = realtimeRoomName(ticket);
       const room = env.CHAT_ROOMS.get(env.CHAT_ROOMS.idFromName(roomName));
       return room.fetch("https://chat.internal/connect", {
@@ -66,6 +85,7 @@ const worker = {
           "X-MKR-Realtime-Role": ticket.role,
           "X-MKR-Realtime-Principal": ticket.principal_email,
           "X-MKR-Realtime-Server": ticket.server_id ?? "",
+          "X-MKR-Realtime-Expires-At": String(Date.now() + CHAT_CONNECTION_SECONDS * 1_000),
         },
       });
     }
@@ -95,7 +115,9 @@ const worker = {
     if (url.pathname.startsWith("/api/") && !url.pathname.startsWith("/api/auth/")) {
       const headers = new Headers(request.headers);
       headers.delete("X-MKR-Authenticated-Owner");
-      const ownerEmail = await resolveOwnerSessionEmail(env.DB, request).catch(() => null);
+      headers.delete("OAI-Authenticated-User-Email");
+      const hasOwnerIdentity = hasOwnerSessionCookie(request) || Boolean(trustedPlatformUserEmail(request));
+      const ownerEmail = hasOwnerIdentity ? await resolveOwnerSessionEmail(env.DB, request).catch(() => null) : null;
       if (ownerEmail) headers.set("X-MKR-Authenticated-Owner", ownerEmail);
       routedRequest = new Request(request, { headers });
     }
@@ -103,9 +125,27 @@ const worker = {
   },
 };
 
+let lastDirectoryMaintenanceAt = 0;
+let lastPrivacyCleanupAt = 0;
+
+function shouldRunDirectoryMaintenance() {
+  const now = Date.now();
+  if (now - lastDirectoryMaintenanceAt < 30_000) return false;
+  lastDirectoryMaintenanceAt = now;
+  return true;
+}
+
+function shouldRunPrivacyCleanup() {
+  const now = Date.now();
+  if (now - lastPrivacyCleanupAt < 6 * 60 * 60 * 1_000) return false;
+  lastPrivacyCleanupAt = now;
+  return true;
+}
+
 function secureResponse(response: Response, embeddable = false) {
   const secured = new Response(response.body, response);
   secured.headers.set("X-Content-Type-Options", "nosniff");
+  secured.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   secured.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   secured.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
   if (embeddable) {

@@ -11,6 +11,7 @@ import { ServerCategoryTags } from "@/components/server-category-tags";
 import { ServerRegistrationDialog } from "@/components/server-registration-dialog";
 import { ServerDescriptionEditor } from "@/components/server-description-editor";
 import { MinecraftHead } from "@/components/minecraft-head";
+import { useTimedMotion } from "@/components/use-timed-motion";
 import { assetAccept, assetSizeLabel, assetSpecs, isMotionAssetType, motionAssetAutoFits, type AssetKind } from "@/lib/image-assets";
 import { descriptionPlainText, type DescriptionDocument } from "@/lib/server-description";
 import { useChatRealtime, type ChatConnectionStatus } from "@/lib/use-chat-realtime";
@@ -181,6 +182,7 @@ export default function OperatorPage() {
   const channelEndRef = useRef<HTMLDivElement | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEmail, setAuthEmail] = useState("");
+  const [authMode, setAuthMode] = useState("email");
   const [ownership, setOwnership] = useState<OwnershipSummary>({ outgoing: [], incoming: [], claims: [] });
   const [transferEmail, setTransferEmail] = useState("");
   const [transferChallenge, setTransferChallenge] = useState<TransferChallenge | null>(null);
@@ -265,9 +267,10 @@ export default function OperatorPage() {
     fetch("/api/auth/session", { cache: "no-store" })
       .then(async (sessionResponse) => {
         if (!sessionResponse.ok) { if (active) { setLoading(false); setAuthChecked(true); } return; }
-        const session = await sessionResponse.json() as { email: string };
+        const session = await sessionResponse.json() as { email: string; authMode?: string };
         if (!active) return;
         setAuthEmail(session.email);
+        setAuthMode(session.authMode ?? "email");
         const [response] = await Promise.all([fetch("/api/servers?mine=1"), loadOwnership()]);
         const body = await response.json() as { servers?: ManagedServer[]; error?: string };
         if (!response.ok) throw new Error(body.error ?? "서버 목록을 불러오지 못했습니다.");
@@ -361,6 +364,10 @@ export default function OperatorPage() {
   }
 
   async function logout() {
+    if (authMode === "sites") {
+      window.location.assign("/signout-with-chatgpt?return_to=/");
+      return;
+    }
     const response = await fetch("/api/auth/session", { method: "DELETE" });
     if (!response.ok) { setMessage("로그아웃에 실패했습니다."); return; }
     router.replace("/login?returnTo=/operator");
@@ -905,10 +912,13 @@ function AssetCurrentPreview({ serverId, kind, revision, file, contentType, tran
   const sourceType = file?.type ?? contentType;
   const webm = sourceType === "video/webm";
   const gif = sourceType === "image/gif";
+  const motionActive = useTimedMotion(webm || gif ? sourceUrl : null);
+  const assetLabel = assetLabels.find((asset) => asset.kind === kind)?.label ?? "서버 이미지";
   const motionStyle = { objectPosition: `${transform.focusX}% ${transform.focusY}%`, transform: `scale(${transform.zoom / 100})`, transformOrigin: `${transform.focusX}% ${transform.focusY}%` } as CSSProperties;
   return <span className="asset-current" style={{ aspectRatio: `${spec.width}/${spec.height}`, backgroundImage: webm || gif ? "linear-gradient(125deg,var(--accent),var(--ink))" : `url(${sourceUrl}),linear-gradient(125deg,var(--accent),var(--ink))` }}>
-    {webm && <video src={sourceUrl} style={motionStyle} autoPlay loop muted playsInline preload="metadata" aria-label={`${kind} WebM 미리보기`} />}
-    {gif && <img src={sourceUrl} style={motionStyle} alt={`${kind} GIF 미리보기`} />}
+    {motionActive && webm && <video className="motion-media" src={sourceUrl} style={motionStyle} autoPlay loop muted playsInline preload="metadata" aria-label={`${assetLabel} WebM 미리보기`} />}
+    {motionActive && gif && <img className="motion-media" src={sourceUrl} style={motionStyle} alt={`${assetLabel} GIF 미리보기`} />}
+    {!motionActive && (webm || gif) && <span className="motion-preview-stopped">움직임 미리보기 정지</span>}
     <i>{file ? "교체 준비" : "현재 이미지 · 미등록 시 기본 비주얼"}</i>
   </span>;
 }
@@ -927,6 +937,8 @@ function MotionCropWorkspace({ serverId, kind, revision, file, metadata, transfo
   useEffect(() => () => { if (localUrl) URL.revokeObjectURL(localUrl); }, [localUrl]);
   const sourceUrl = localUrl ?? `/api/servers/${serverId}/assets/${kind}?v=${revision}`;
   const sourceType = file?.type ?? metadata?.contentType ?? "";
+  const motionActive = useTimedMotion(isMotionAssetType(sourceType) ? sourceUrl : null);
+  const assetLabel = assetLabels.find((asset) => asset.kind === kind)?.label ?? "서버 이미지";
   const [sourceSize, setSourceSize] = useState({ width: metadata?.width ?? spec.width, height: metadata?.height ?? spec.height });
   const sourceRatio = Math.max(0.01, sourceSize.width / sourceSize.height);
   const targetRatio = spec.width / spec.height;
@@ -996,8 +1008,8 @@ function MotionCropWorkspace({ serverId, kind, revision, file, metadata, transfo
       <div className="motion-workspace-heading"><div><span>원본 영역 선택</span><b>{sourceSize.width} × {sourceSize.height}</b></div><small>박스 안을 이동 · 모서리를 드래그해 크기 조절</small></div>
       <div ref={stageRef} className="motion-source-canvas" style={{ "--source-ratio": sourceRatio, aspectRatio: `${sourceSize.width}/${sourceSize.height}` } as CSSProperties}>
         {sourceType === "video/webm"
-          ? <video src={sourceUrl} autoPlay loop muted playsInline preload="metadata" onLoadedMetadata={(event) => setSourceSize({ width: event.currentTarget.videoWidth || spec.width, height: event.currentTarget.videoHeight || spec.height })} />
-          : <img src={sourceUrl} alt="움직이는 이미지 원본" onLoad={(event) => setSourceSize({ width: event.currentTarget.naturalWidth || spec.width, height: event.currentTarget.naturalHeight || spec.height })} />}
+          ? motionActive ? <video className="motion-media" src={sourceUrl} autoPlay loop muted playsInline preload="metadata" aria-label={`${assetLabel} WebM 원본`} onLoadedMetadata={(event) => setSourceSize({ width: event.currentTarget.videoWidth || spec.width, height: event.currentTarget.videoHeight || spec.height })} /> : <span className="motion-preview-stopped">움직임 미리보기 정지</span>
+          : motionActive ? <img className="motion-media" src={sourceUrl} alt={`${assetLabel} GIF 원본`} onLoad={(event) => setSourceSize({ width: event.currentTarget.naturalWidth || spec.width, height: event.currentTarget.naturalHeight || spec.height })} /> : <span className="motion-preview-stopped">움직임 미리보기 정지</span>}
         <div className="motion-crop-frame" style={{ left: `${frameCenterX - cropWidth / 2}%`, top: `${frameCenterY - cropHeight / 2}%`, width: `${cropWidth}%`, height: `${cropHeight}%` }} onPointerDown={startMove} onPointerMove={moveFrame} onPointerUp={stopPointer} onPointerCancel={stopPointer}>
           <span>{spec.width}:{spec.height} 출력 영역</span>
           <button type="button" className="corner-tl" aria-label="왼쪽 위 모서리로 크롭 크기 조절" onPointerDown={(event) => startResize(event, -1, -1)} onPointerMove={resizeFrame} onPointerUp={stopPointer} onPointerCancel={stopPointer} />
@@ -1008,7 +1020,7 @@ function MotionCropWorkspace({ serverId, kind, revision, file, metadata, transfo
       </div>
     </section>
     <aside className="motion-result-panel">
-      <div className="motion-workspace-heading"><div><span>실시간 결과 미리보기</span><b>{spec.width} × {spec.height}</b></div><small>GIF·WebM 움직임 유지</small></div>
+      <div className="motion-workspace-heading"><div><span>실시간 결과 미리보기</span><b>{spec.width} × {spec.height}</b></div><small>움직임은 5초 뒤 자동 정지</small></div>
       <div className="motion-result-preview" style={{ aspectRatio: `${spec.width}/${spec.height}` }}><AssetCurrentPreview serverId={serverId} kind={kind} revision={revision} file={file} contentType={metadata?.contentType} transform={transform} /></div>
       <div className="motion-crop-controls">
         <label><span>표시 확대 <b>{transform.zoom}%</b></span><input type="range" min="100" max="300" step="1" value={transform.zoom} onChange={(event) => updateZoom(Number(event.target.value))} aria-label="움직임 이미지 확대" /></label>

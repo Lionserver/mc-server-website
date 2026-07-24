@@ -8,6 +8,11 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     if (error instanceof Response) return error;
-    return Response.json({ error: error instanceof Error ? error.message : "인증에 실패했습니다." }, { status: 500 });
+    console.error("email-code verification failed", error);
+    return Response.json({
+      error: process.env.NODE_ENV === "production"
+        ? "인증을 처리하지 못했습니다."
+        : error instanceof Error ? error.message : "인증에 실패했습니다.",
+    }, { status: 500 });
   }
 }

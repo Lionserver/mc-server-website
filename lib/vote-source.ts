@@ -1,5 +1,7 @@
+import { ipAddressVersion, networkFingerprintAddress, normalizeIpAddress as normalizeIpLiteral } from "@/lib/ip-security.mjs";
+
 const IP_METADATA_RETENTION_SECONDS = 90 * 86_400;
-const LOCAL_HASH_SECRET = "minecraft.kr-local-vote-ip-v1";
+const MINIMUM_HASH_SECRET_LENGTH = 32;
 
 export type VoteSourceEnvironment = {
   VOTE_IP_HASH_SECRET?: string;
@@ -8,6 +10,7 @@ export type VoteSourceEnvironment = {
 
 export type VoteSourceMetadata = {
   fingerprint: string;
+  legacyFingerprint: string;
   ipMasked: string;
   ipHash: string;
   ipVersion: 0 | 4 | 6;
@@ -15,17 +18,20 @@ export type VoteSourceMetadata = {
 
 export async function voteSourceMetadata(request: Request, serverId: string, environment: VoteSourceEnvironment): Promise<VoteSourceMetadata> {
   const ip = requestIpAddress(request);
+  const hashIp = legacyCompatibleRequestIpAddress(request) ?? ip;
   const agent = request.headers.get("user-agent")?.slice(0, 500) || "unknown";
   const secret = voteIpHashSecret(environment);
-  const [fingerprint, ipHash] = await Promise.all([
-    hmacHex(secret, `vote-source-fingerprint-v1|${serverId}|${ip}|${agent}`),
-    hmacHex(secret, ip),
+  const networkAddress = networkFingerprintAddress(ip);
+  const [fingerprint, legacyFingerprint, ipHash] = await Promise.all([
+    hmacHex(secret, `vote-source-fingerprint-v2|${serverId}|${networkAddress}`),
+    hmacHex(secret, `vote-source-fingerprint-v1|${serverId}|${hashIp}|${agent}`),
+    hmacHex(secret, hashIp),
   ]);
-  return { fingerprint, ipMasked: maskIpAddress(ip), ipHash, ipVersion: ipVersion(ip) };
+  return { fingerprint, legacyFingerprint, ipMasked: maskIpAddress(ip), ipHash, ipVersion: ipVersion(ip) };
 }
 
 export async function voteIpSearchHash(value: string, environment: VoteSourceEnvironment) {
-  const ip = normalizeIpAddress(value);
+  const ip = legacyCompatibleIpAddress(value);
   if (!ip) return null;
   return hmacHex(voteIpHashSecret(environment), ip);
 }
@@ -58,7 +64,12 @@ export function requestIpAddress(request: Request) {
   return normalizeIpAddress(forwarded) ?? "local";
 }
 
-export function normalizeIpAddress(rawValue: string) {
+function legacyCompatibleRequestIpAddress(request: Request) {
+  const forwarded = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0] ?? "";
+  return legacyCompatibleIpAddress(forwarded);
+}
+
+function legacyCompatibleIpAddress(rawValue: string) {
   let value = rawValue.trim().toLowerCase();
   if (!value || value.length > 64) return null;
   if (value.startsWith("[") && value.includes("]")) value = value.slice(1, value.indexOf("]"));
@@ -70,6 +81,10 @@ export function normalizeIpAddress(rawValue: string) {
   }
   if (value.includes(":") && /^[0-9a-f:]+$/.test(value) && !value.includes(":::")) return value;
   return null;
+}
+
+export function normalizeIpAddress(rawValue: string) {
+  return normalizeIpLiteral(rawValue);
 }
 
 export function maskIpAddress(ip: string) {
@@ -86,13 +101,15 @@ export function maskIpAddress(ip: string) {
 }
 
 function ipVersion(ip: string): 0 | 4 | 6 {
-  if (ip.split(".").length === 4) return 4;
-  if (ip.includes(":")) return 6;
-  return 0;
+  return ipAddressVersion(ip);
 }
 
 function voteIpHashSecret(environment: VoteSourceEnvironment) {
-  return environment.VOTE_IP_HASH_SECRET?.trim() || environment.BRIDGE_MASTER_SECRET?.trim() || LOCAL_HASH_SECRET;
+  const secret = environment.VOTE_IP_HASH_SECRET?.trim() || environment.BRIDGE_MASTER_SECRET?.trim() || "";
+  if (secret.length < MINIMUM_HASH_SECRET_LENGTH) {
+    throw Response.json({ error: "추천 보안 설정이 준비되지 않았습니다." }, { status: 503 });
+  }
+  return secret;
 }
 
 async function hmacHex(secret: string, value: string) {

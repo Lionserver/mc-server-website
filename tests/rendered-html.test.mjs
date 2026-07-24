@@ -4,6 +4,7 @@ import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import { MAX_TEMPORARY_ADMIN_ACCESS_SECONDS, temporaryAdminSession } from "../lib/admin-temporary-access.mjs";
 import { resolveThemePreference, safeInternalReturnTo } from "../lib/browser-preferences.mjs";
+import { isPrivateHostName, isPrivateOrReservedIp, networkFingerprintAddress, normalizeIpAddress } from "../lib/ip-security.mjs";
 import { announcementPhase, nextAnnouncementTransition } from "../lib/site-announcement-lifecycle.mjs";
 
 async function render(pathname = "/") {
@@ -47,7 +48,7 @@ test("server-renders the Minecraft.kr product shell", async () => {
   assert.match(html, /계정 확인/);
   assert.match(html, /운영자 센터/);
   assert.match(html, /og:image/);
-  assert.match(html, /https:\/\/minecraft\.kr\/og\.png/);
+  assert.match(html, /https?:\/\/[^"]+\/og\.png/);
   assert.match(headerSource, /className="brand header-brand"[^\n]*MINECRAFT SERVER LIST/);
   assert.doesNotMatch(headerSource, /className="brand header-brand"[^\n]*brand-mark/);
   assert.doesNotMatch(pageSource, /실제 추천 기록 기준 · PC·모바일 공용 GIF·WebM 468×60/);
@@ -259,50 +260,73 @@ test("server-renders the protected administrator shell", async () => {
   assert.match(html, /총관리자 보안 세션 확인 중/);
 });
 
-test("limits temporary administrator bypass to a configured identity and one hour", async () => {
+test("retires the temporary administrator header bypass fail-closed", async () => {
   const now = 1_800_000_000;
   const expiresAt = now + MAX_TEMPORARY_ADMIN_ACCESS_SECONDS;
-  assert.deepEqual(
-    temporaryAdminSession(null, "Owner@Example.com", String(expiresAt), now),
-    { email: "owner@example.com", expiresAt, identitySource: "configured-actor" },
-  );
-  assert.deepEqual(
-    temporaryAdminSession("owner@example.com", "Owner@Example.com", String(expiresAt), now),
-    { email: "owner@example.com", expiresAt, identitySource: "sites-user-header" },
-  );
+  assert.equal(MAX_TEMPORARY_ADMIN_ACCESS_SECONDS, 0);
+  assert.equal(temporaryAdminSession(null, "Owner@Example.com", String(expiresAt), now), null);
+  assert.equal(temporaryAdminSession("owner@example.com", "Owner@Example.com", String(expiresAt), now), null);
   assert.equal(temporaryAdminSession("other@example.com", "owner@example.com", String(expiresAt), now), null);
-  assert.equal(temporaryAdminSession(null, null, String(expiresAt), now), null);
-  assert.equal(temporaryAdminSession(null, "not-an-email", String(expiresAt), now), null);
-  assert.equal(temporaryAdminSession(null, "owner@example.com", String(now), now), null);
-  assert.equal(temporaryAdminSession(null, "owner@example.com", String(expiresAt + 1), now), null);
-  assert.equal(temporaryAdminSession(null, "owner@example.com", ` ${expiresAt}`, now), null);
-  assert.equal(temporaryAdminSession(null, "owner@example.com", "1.8000036e9", now), null);
-  assert.equal(temporaryAdminSession(null, "owner@example.com", String(expiresAt), Number.NaN), null);
 
-  const [security, sessionRoute, adminPage, envExample, devVarsExample] = await Promise.all([
+  const [security, sessionRoute, worker, envExample, devVarsExample] = await Promise.all([
     readFile(new URL("../lib/admin-security.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/admin/session/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
     readFile(new URL("../.dev.vars.example", import.meta.url), "utf8"),
   ]);
-  assert.match(security, /oai-authenticated-user-email/);
-  assert.match(security, /temporaryAdminSession\(\s*request\.headers\.get\("oai-authenticated-user-email"\),\s*environment\.ADMIN_TEMP_BYPASS_EMAIL/);
   assert.match(security, /if \(options\?\.mutating\) assertSameOrigin\(request\)/);
-  assert.match(security, /temporary: true/);
-  assert.match(security, /temporaryBypassOptOutCookie/);
-  assert.match(security, /temporary-disabled-/);
+  assert.doesNotMatch(security, /temporaryAdminSession/);
+  assert.doesNotMatch(security, /temporary: true/);
   assert.match(sessionRoute, /authMode: session\.authMode/);
   assert.match(sessionRoute, /"Cache-Control": "no-store"/);
-  assert.match(sessionRoute, /admin\.temporary_access\.started/);
-  assert.match(sessionRoute, /identitySource: session\.identitySource/);
-  assert.match(adminPage, /임시 접근/);
-  assert.match(adminPage, /overview\.admin\.expiresAt \* 1000 - Date\.now\(\)/);
-  assert.match(adminPage, /setAuthenticated\(false\);[\s\S]*setOverview\(null\)/);
-  assert.match(envExample, /ADMIN_TEMP_BYPASS_EMAIL=""/);
-  assert.match(envExample, /ADMIN_TEMP_BYPASS_UNTIL=""/);
-  assert.match(devVarsExample, /ADMIN_TEMP_BYPASS_EMAIL=""/);
-  assert.match(devVarsExample, /ADMIN_TEMP_BYPASS_UNTIL=""/);
+  assert.doesNotMatch(sessionRoute, /admin\.temporary_access/);
+  assert.match(worker, /headers\.delete\("OAI-Authenticated-User-Email"\)/);
+  assert.match(worker, /resolveOwnerSessionEmail\(env\.DB, request\)/);
+  assert.match(await readFile(new URL("../lib/user-auth.ts", import.meta.url), "utf8"), /trustedPlatformUserEmail/);
+  assert.doesNotMatch(envExample, /ADMIN_TEMP_BYPASS_/);
+  assert.doesNotMatch(devVarsExample, /ADMIN_TEMP_BYPASS_/);
+});
+
+test("rejects private and reserved socket targets and canonicalizes abuse-control addresses", async () => {
+  for (const address of [
+    "0.0.0.0", "10.20.30.40", "100.64.0.1", "127.0.0.1", "169.254.1.1", "172.16.0.1",
+    "192.168.1.1", "192.0.2.10", "198.51.100.2", "203.0.113.4", "224.0.0.1",
+    "::1", "fc00::1", "fe80::1", "::ffff:127.0.0.1", "2001:db8::1", "2002:7f00:1::",
+  ]) assert.equal(isPrivateOrReservedIp(address), true, address);
+  assert.equal(isPrivateOrReservedIp("8.8.8.8"), false);
+  assert.equal(isPrivateOrReservedIp("2606:4700:4700::1111"), false);
+  assert.equal(isPrivateHostName("metadata.internal"), true);
+  assert.equal(isPrivateHostName("host.local"), true);
+  assert.equal(normalizeIpAddress("2001:0DB8::0001"), "2001:db8:0:0:0:0:0:1");
+  assert.equal(networkFingerprintAddress("2606:4700:4700:0:abcd::1"), "2606:4700:4700:0::/64");
+
+  const [ping, guards, ownership, voteSource, chatRoom, worker, schema, migration] = await Promise.all([
+    readFile(new URL("../lib/minecraft-ping.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/request-guards.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/server-ownership.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/vote-source.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/chat-room.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0023_wide_bulldozer.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(ping, /resolvePublicHostAddress/);
+  assert.match(ping, /hostname: connectHost/);
+  assert.match(ping, /allowPrivate && process\.env\.NODE_ENV === "development"/);
+  assert.match(ping, /Promise\.allSettled/);
+  assert.match(guards, /PROFILE_LOOKUPS_PER_MINUTE/);
+  assert.match(guards, /SERVER_QUOTA_PER_OWNER/);
+  assert.match(guards, /OWNER_STORAGE_BYTES/);
+  assert.doesNotMatch(ownership, /SELECT c\.\*, d\.title, d\.address, d\.port, d\.owner_email FROM server_ownership_claims c[\s\S]{0,240}claimant_email/);
+  assert.match(ownership, /includeCurrentOwnerEmail \? \{ currentOwnerEmail:/);
+  assert.match(voteSource, /vote-source-fingerprint-v2/);
+  assert.doesNotMatch(voteSource, /LOCAL_HASH_SECRET/);
+  assert.match(chatRoom, /authorization refresh required/);
+  assert.match(chatRoom, /setAlarm/);
+  assert.match(worker, /realtime authorization changed/);
+  assert.match(schema, /securityRateLimits/);
+  assert.match(migration, /CREATE TABLE `security_rate_limits`/);
 });
 
 test("ships expiring server enforcement controls and formatted auction bids", async () => {
@@ -467,17 +491,22 @@ test("ships a structured server-introduction editor with safe poster uploads", a
   assert.match(worker, /url\.pathname\.startsWith\("\/embed\/server\/"\)/);
 });
 
-test("server-renders the email owner login shell", async () => {
-  const [response, layout] = await Promise.all([
+test("server-renders the platform-first owner login shell", async () => {
+  const [response, layout, loginPage, capabilitiesRoute] = await Promise.all([
     render("/login"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/auth/capabilities/route.ts", import.meta.url), "utf8"),
   ]);
   assert.equal(response.status, 200);
   const html = await response.text();
   const head = html.match(/<head[^>]*>[\s\S]*?<\/head>/i)?.[0] ?? "";
-  assert.match(html, /이메일로 로그인/);
-  assert.match(html, /인증 코드 받기/);
-  assert.match(html, /비밀번호 없이 이메일 인증 코드/);
+  assert.match(html, /운영자 로그인/);
+  assert.match(loginPage, /ChatGPT로 안전하게 로그인/);
+  assert.match(loginPage, /인증 코드 받기/);
+  assert.match(loginPage, /capabilities\.sites && capabilities\.email/);
+  assert.match(capabilitiesRoute, /RESEND_API_KEY/);
+  assert.match(capabilitiesRoute, /SITES_AUTH_ENABLED/);
   assert.match(head, /<script[^>]*>[\s\S]*minecraft-kr-theme[\s\S]*<\/script>/);
   assert.match(head, /prefers-color-scheme: dark/);
   assert.match(head, /document\.documentElement\.dataset\.theme/);
@@ -548,11 +577,13 @@ test("ships passwordless owner auth and audited ownership transfer flows", async
   assert.match(home, /params\.delete\("register"\)/);
   assert.match(login, /safeInternalReturnTo/);
   assert.match(login, /router\.replace\(returnTo\)/);
+  assert.match(login, /\/signin-with-chatgpt\?return_to=\$\{encodeURIComponent\(returnTo\)\}/);
+  assert.match(login, /ChatGPT로 안전하게 로그인/);
   assert.match(broadcasts, /encodeURIComponent\("\/broadcasts\?register=1"\)/);
   assert.match(broadcasts, /loginReturnTo="\/broadcasts\?register=1"/);
   assert.match(registration, /router\.push\(`\/login\?returnTo=\$\{encodeURIComponent\(loginReturnTo\)\}`\)/);
   assert.doesNotMatch(home, /window\.location\.assign\("\/login/);
-  assert.doesNotMatch(login, /window\.location\.(?:assign|replace)/);
+  assert.doesNotMatch(login, /window\.location\.(?:assign|replace)\(\s*returnTo/);
   assert.doesNotMatch(broadcasts, /window\.location\.assign\("\/login/);
   assert.match(header, /내 서버 관리 · 로그인됨/);
   assert.doesNotMatch(home, /nav-owner-link/);
@@ -576,8 +607,10 @@ test("ships passwordless owner auth and audited ownership transfer flows", async
 });
 
 test("ships responsive, accessible, realtime and exact-spec product assets", async () => {
-  const [page, operator, registration, adminPage, adminSecurity, chatRealtime, chatHook, chatRoom, directoryRoom, directoryRealtime, publicDirectory, premiumAuction, votesApi, worker, css, layout, packageJson, schema, directoryApi, assetApi, assetServe, serverDirectory, serverUpdate, imageAssets, imageCrop, motionCropMigration, og] = await Promise.all([
+  const [page, trendChart, timedMotion, operator, registration, adminPage, adminSecurity, chatRealtime, chatHook, chatRoom, directoryRoom, directoryRealtime, publicDirectory, premiumAuction, votesApi, worker, css, layout, packageJson, schema, directoryApi, assetApi, assetServe, serverDirectory, serverUpdate, imageAssets, imageCrop, motionCropMigration, og] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/player-trend-chart.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/use-timed-motion.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
@@ -614,7 +647,8 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(registration, /const \[previews, setPreviews\]/);
   assert.match(registration, /URL\.createObjectURL\(file\)/);
   assert.match(registration, /URL\.revokeObjectURL\(previous\)/);
-  assert.match(registration, /서버 아이콘 GIF·이미지 미리보기/);
+  assert.match(registration, /서버 아이콘 GIF 미리보기/);
+  assert.match(registration, /서버 아이콘 미리보기/);
   assert.match(registration, /저장 준비 완료/);
   assert.match(registration, /정지 이미지·GIF·WebM 사용 가능/);
   assert.match(registration, /register-modal[^>]*onPointerDownOutside/);
@@ -627,19 +661,20 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(registration, /미등록 시 기본 배너 자동 적용/);
   assert.match(registration, /이미지는 어떤 크기든 선택하면 규격에 맞춰 실시간 크롭/);
   assert.match(packageJson, /"recharts": "3\.9\.2"/);
-  assert.match(page, /TrendChartTooltip/);
-  assert.match(page, /<AreaChart[^>]*responsive[^>]*accessibilityLayer/);
-  assert.match(page, /<ReferenceLine y=\{averagePlayers\}/);
-  assert.match(page, /<ReferenceDot x=\{currentPoint\.timestamp\}/);
-  assert.match(page, /domain=\{\[0, yAxisMax\]\}/);
+  assert.match(page, /dynamic\([\s\S]*?player-trend-chart/);
+  assert.match(trendChart, /TrendChartTooltip/);
+  assert.match(trendChart, /<AreaChart[^>]*responsive[^>]*accessibilityLayer/);
+  assert.match(trendChart, /<ReferenceLine y=\{averagePlayers\}/);
+  assert.match(trendChart, /<ReferenceDot x=\{currentPoint\.timestamp\}/);
+  assert.match(trendChart, /domain=\{\[0, yAxisMax\]\}/);
   assert.match(page, /const chartYAxisMax = trendChartUpperBound\(peakPlayers\)/);
   assert.match(page, /peak \+ Math\.max\(1, Math\.ceil\(peak \* 0\.15\)\)/);
   assert.doesNotMatch(page, /domain=\{\[0, capacity\]\}/);
-  assert.match(page, /정원 대비/);
+  assert.match(trendChart, /정원 대비/);
   assert.match(css, /\.trend-chart-frame \{[^}]*height:270px[^}]*overflow:hidden/);
   assert.match(css, /\.trend-tooltip \{[^}]*backdrop-filter:blur\(8px\)/);
   assert.match(page, /14일 평균/);
-  assert.match(page, /전일 대비/);
+  assert.match(trendChart, /전일 대비/);
   assert.match(page, /TRUST SCORE/);
   assert.match(page, /광고·추천수와 무관한 운영 신뢰 지표/);
   assert.match(page, /server\.trustBreakdown\.map/);
@@ -773,8 +808,13 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(registration, /accept=\{assetAccept\("icon"\)\}/);
   assert.match(registration, /서버 아이콘 WebM 미리보기/);
   assert.match(page, /video\/webm/);
-  assert.match(page, /className="banner-webm desktop-banner-webm"/);
+  assert.match(page, /className="banner-webm desktop-banner-webm motion-media"/);
   assert.match(page, /autoPlay loop muted playsInline/);
+  assert.match(page, /useTimedMotion/);
+  assert.match(timedMotion, /MOTION_WINDOW_MS = 5_000/);
+  assert.match(timedMotion, /prefers-reduced-motion: reduce/);
+  assert.match(timedMotion, /visibilitychange/);
+  assert.match(timedMotion, /setActive\(false\)/);
   assert.match(page, /motionTransformStyle/);
   assert.match(page, /objectPosition/);
   assert.match(page, /function ServerIcon/);
@@ -810,7 +850,7 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(css, /\.embed-code code \{[^}]*overflow-x:auto/);
   assert.doesNotMatch(css, /\.address-hero span \{[^}]*text-overflow:ellipsis/);
   assert.match(layout, /metadataBase/);
-  assert.match(layout, /width: 1200, height: 630/);
+  assert.match(layout, /width:\s*1200,[\s\S]*?height:\s*630/);
   assert.match(schema, /directory_servers/);
   assert.match(schema, /server_assets/);
   assert.match(directoryApi, /ownerEmailFromRequest/);
@@ -873,6 +913,54 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.equal(og.subarray(1, 4).toString("ascii"), "PNG");
   assert.equal(og.readUInt32BE(16), 1200);
   assert.equal(og.readUInt32BE(20), 630);
+});
+
+test("keeps launch UI resilient across narrow layouts, focus flows and optional realtime", async () => {
+  const [
+    home, broadcasts, header, registration, cropEditor, descriptionEditor,
+    admin, login, operator, timedMotion, css,
+  ] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/broadcasts/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/public-site-header.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/image-crop-editor.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/server-description-editor.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../components/use-timed-motion.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(header, /aria-controls="public-primary-navigation"/);
+  assert.match(header, /aria-expanded=\{mobileOpen\}/);
+  assert.match(header, /aria-label=\{mobileOpen \? "메뉴 닫기" : "메뉴 열기"\}/);
+  assert.match(header, /requestAnimationFrame\(\(\) => mobileButtonRef\.current\?\.focus\(\)\)/);
+  assert.match(home, /fetch\("\/api\/realtime\/capabilities", \{ cache: "no-store" \}\)/);
+  assert.match(home, /if \(!response\.ok \|\| !capabilities\.directory\)/);
+  assert.match(home, /DirectoryLoadError/);
+  assert.match(home, /role="alert"/);
+  assert.match(home, /onCloseAutoFocus/);
+  assert.match(registration, /onCloseAutoFocus/);
+  assert.doesNotMatch(cropEditor, /window\.addEventListener\("keydown"/);
+  assert.match(broadcasts, /role="alert"/);
+  assert.match(broadcasts, /aria-busy="true"/);
+  assert.match(descriptionEditor, /role="toolbar"/);
+  assert.match(descriptionEditor, /role: "textbox"/);
+  assert.match(descriptionEditor, /"aria-multiline": "true"/);
+  assert.match(admin, /role="tablist"/);
+  assert.match(admin, /role="tabpanel"/);
+  assert.match(admin, /aria-selected=\{tab === key\}/);
+  assert.match(login, /\/signin-with-chatgpt\?return_to=\$\{encodeURIComponent\(returnTo\)\}/);
+  assert.match(operator, /authMode === "sites"/);
+  assert.match(operator, /\/signout-with-chatgpt\?return_to=\//);
+  assert.match(timedMotion, /MOTION_WINDOW_MS = 5_000/);
+  assert.match(timedMotion, /document\.visibilityState !== "visible"/);
+  assert.match(css, /@media \(max-width: 1120px\)/);
+  assert.match(css, /\.header-inner \{ min-width:0;/);
+  assert.match(css, /\.server-row > \*,\.small-server-row > \* \{ min-width:0; \}/);
+  assert.match(css, /\.motion-media,\.banner-webm,\.banner-gif \{ display:none !important; \}/);
 });
 
 test("keeps the transport body limit above the validated image limit", async () => {
@@ -942,7 +1030,7 @@ test("ships searchable privacy-preserving administrator vote logs", async () => 
   assert.match(source, /IP_METADATA_RETENTION_SECONDS = 90 \* 86_400/);
   assert.match(source, /purgeExpiredVoteIpMetadata/);
   assert.match(source, /source_fingerprint = 'expired:' \|\| id/);
-  assert.match(source, /hmacHex\(secret, `vote-source-fingerprint-v1\|/);
+  assert.match(source, /hmacHex\(secret, `vote-source-fingerprint-v2\|/);
   assert.doesNotMatch(source, /source_ip_raw/);
   assert.match(publicDirectory, /source_ip_masked TEXT NOT NULL DEFAULT ''/);
   assert.match(schema, /sourceIpHash: text\("source_ip_hash"\)/);
@@ -1105,7 +1193,11 @@ test("ships scheduled global notices with secure admin lifecycle controls", asyn
   assert.match(banner, /Dialog\.Content/);
   assert.match(banner, /ResizeObserver/);
   assert.match(banner, /requestSequenceRef/);
-  assert.match(banner, /aria-pressed/);
+  assert.match(banner, /role="tablist"/);
+  assert.match(banner, /role="tab"/);
+  assert.match(banner, /aria-selected/);
+  assert.match(banner, /role=\{announcements\.length > 1 \? "tabpanel" : undefined\}/);
+  assert.match(banner, /event\.key === "ArrowRight"/);
   assert.match(banner, /site-announcement-meta/);
   assert.match(banner, /site-announcement-detail/);
   assert.doesNotMatch(banner, /dangerouslySetInnerHTML/);
@@ -1153,4 +1245,40 @@ test("uses half-open scheduled notice windows and the nearest transition", () =>
   assert.equal(nextAnnouncementTransition([{ endsAt: 200 }, { endsAt: 240 }], 180, 150), 180);
   assert.equal(nextAnnouncementTransition([{ endsAt: 200 }], null, 150), 200);
   assert.equal(nextAnnouncementTransition([], 150, 150), null);
+});
+
+test("publishes crawlable metadata routes and indexable server detail documents", async () => {
+  const [robotsResponse, sitemapResponse, manifestResponse, adminResponse, serverPage, seoModel] =
+    await Promise.all([
+      render("/robots.txt"),
+      render("/sitemap.xml"),
+      render("/manifest.webmanifest"),
+      render("/admin"),
+      readFile(new URL("../app/servers/[serverId]/page.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../lib/public-server-seo.ts", import.meta.url), "utf8"),
+    ]);
+
+  assert.equal(robotsResponse.status, 200);
+  const robots = await robotsResponse.text();
+  assert.match(robots, /User-Agent: \*/);
+  assert.match(robots, /Sitemap: https:\/\/minecraft-kr-server-list\.korcard001\.chatgpt\.site\/sitemap\.xml/);
+
+  assert.equal(sitemapResponse.status, 200);
+  const sitemap = await sitemapResponse.text();
+  assert.match(sitemap, /<urlset/);
+  assert.match(sitemap, /<loc>https:\/\/minecraft-kr-server-list\.korcard001\.chatgpt\.site\/<\/loc>/);
+
+  assert.equal(manifestResponse.status, 200);
+  const manifest = await manifestResponse.json();
+  assert.equal(manifest.lang, "ko-KR");
+  assert.equal(manifest.icons.length, 2);
+
+  assert.equal(adminResponse.status, 200);
+  assert.match(await adminResponse.text(), /name="robots" content="noindex, nofollow, noarchive"/);
+
+  assert.match(serverPage, /"@type": "GameServer"/);
+  assert.match(serverPage, /alternates: \{ canonical \}/);
+  assert.match(serverPage, /safeJsonLd/);
+  assert.match(seoModel, /WHERE d\.id = \? AND d\.status = 'active' AND d\.deleted_at IS NULL/);
+  assert.doesNotMatch(seoModel, /CREATE TABLE|ALTER TABLE|PRAGMA/);
 });

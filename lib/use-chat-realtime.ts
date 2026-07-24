@@ -22,9 +22,10 @@ export function useChatRealtime(options: {
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let attempts = 0;
+    let realtimeAvailable = true;
 
     const scheduleReconnect = () => {
-      if (!active || reconnectTimer !== null) return;
+      if (!active || !realtimeAvailable || reconnectTimer !== null) return;
       attempts += 1;
       setStatus(attempts > 4 ? "unavailable" : "reconnecting");
       const delay = Math.min(10_000, 500 * 2 ** Math.min(attempts, 5)) + Math.floor(Math.random() * 300);
@@ -32,7 +33,7 @@ export function useChatRealtime(options: {
     };
 
     const connect = async () => {
-      if (!active || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+      if (!active || !realtimeAvailable || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
       setStatus(attempts === 0 ? "connecting" : "reconnecting");
       try {
         const response = await fetch("/api/realtime/ticket", {
@@ -63,6 +64,24 @@ export function useChatRealtime(options: {
         scheduleReconnect();
       }
     };
+    const start = async () => {
+      try {
+        const response = await fetch("/api/realtime/capabilities", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        const body = await response.json() as { chat?: boolean };
+        if (!active) return;
+        realtimeAvailable = response.ok && body.chat === true;
+      } catch {
+        realtimeAvailable = false;
+      }
+      if (!realtimeAvailable) {
+        setStatus("unavailable");
+        return;
+      }
+      await connect();
+    };
 
     const reconnectWhenVisible = () => {
       if (document.visibilityState === "visible" && (!socket || socket.readyState > WebSocket.OPEN)) {
@@ -71,7 +90,7 @@ export function useChatRealtime(options: {
       }
     };
     const reconnectWhenOnline = () => reconnectWhenVisible();
-    const initialTimer = window.setTimeout(() => { void connect(); }, 0);
+    const initialTimer = window.setTimeout(() => { void start(); }, 0);
     document.addEventListener("visibilitychange", reconnectWhenVisible);
     window.addEventListener("online", reconnectWhenOnline);
     return () => {

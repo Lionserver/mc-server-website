@@ -1,3 +1,5 @@
+import { isPrivateHostName, isPrivateOrReservedIp, normalizeIpAddress } from "@/lib/ip-security.mjs";
+
 export interface MinecraftPingResult {
   descriptionText: string;
   playersOnline: number;
@@ -11,10 +13,13 @@ export interface MinecraftPingResult {
 
 export async function pingMinecraftServer(host: string, port: number, allowPrivate = false): Promise<MinecraftPingResult> {
   const endpoint = await resolveMinecraftEndpoint(host, port);
-  if (!allowPrivate && isPrivateHost(endpoint.host)) throw new Response("private or loopback hosts cannot be verified", { status: 400 });
+  const privateNetworkAllowed = allowPrivate && process.env.NODE_ENV === "development";
+  const connectHost = privateNetworkAllowed ? endpoint.host : await resolvePublicHostAddress(endpoint.host);
   const { connect } = await import("cloudflare:sockets");
   const startedAt = Date.now();
-  const socket = connect({ hostname: endpoint.host, port: endpoint.port }, { secureTransport: "off", allowHalfOpen: false });
+  // Connect to the exact public IP returned by our trusted resolver. Resolving
+  // the hostname again inside connect() would reopen a DNS-rebinding window.
+  const socket = connect({ hostname: connectHost, port: endpoint.port }, { secureTransport: "off", allowHalfOpen: false });
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
   let timedOut = false;
@@ -80,7 +85,7 @@ export interface MinecraftEndpoint {
 
 export async function resolveMinecraftEndpoint(host: string, port: number): Promise<MinecraftEndpoint> {
   const fallback = { host, port, usedSrv: false };
-  if (port !== 25565 || isPrivateHost(host)) return fallback;
+  if (port !== 25565 || isPrivateHostName(host)) return fallback;
   try {
     const query = `_minecraft._tcp.${host.replace(/\.$/, "")}`;
     const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(query)}&type=SRV`, {
@@ -105,6 +110,42 @@ export async function resolveMinecraftEndpoint(host: string, port: number): Prom
   }
 }
 
+export async function resolvePublicHostAddress(host: string): Promise<string> {
+  const normalizedHost = host.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  const literal = normalizeIpAddress(normalizedHost);
+  if (literal) {
+    if (isPrivateOrReservedIp(literal)) throw privateAddressResponse();
+    return literal;
+  }
+  if (isPrivateHostName(normalizedHost)
+    || !/^(?=.{1,253}$)(?!-)[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(normalizedHost)) {
+    throw privateAddressResponse();
+  }
+
+  const resolved = new Set<string>();
+  await Promise.allSettled([1, 28].map(async (recordType) => {
+    const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(normalizedHost)}&type=${recordType === 1 ? "A" : "AAAA"}`, {
+      headers: { Accept: "application/dns-json" },
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!response.ok) return;
+    const body = await response.json() as { Answer?: Array<{ type?: number; data?: string }> };
+    for (const answer of body.Answer ?? []) {
+      if (answer.type !== recordType || typeof answer.data !== "string") continue;
+      const address = normalizeIpAddress(answer.data);
+      if (address) resolved.add(address);
+    }
+  }));
+
+  const publicAddress = [...resolved].find((address) => !isPrivateOrReservedIp(address));
+  if (publicAddress) return publicAddress;
+  if (resolved.size > 0) throw privateAddressResponse();
+  throw Response.json({
+    error: "서버 주소의 공개 IPv4 또는 IPv6 DNS 레코드를 확인할 수 없습니다.",
+    code: "MINECRAFT_DNS_UNRESOLVED",
+  }, { status: 502 });
+}
+
 function flattenDescription(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(flattenDescription).join("");
@@ -115,13 +156,11 @@ function flattenDescription(value: unknown): string {
   return "";
 }
 
-function isPrivateHost(host: string) {
-  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (normalized === "localhost" || normalized === "::1" || normalized.endsWith(".local")) return true;
-  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalized);
-  if (!match) return false;
-  const [a, b] = [Number(match[1]), Number(match[2])];
-  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+function privateAddressResponse() {
+  return Response.json({
+    error: "사설·루프백·예약 네트워크 주소는 서버 인증에 사용할 수 없습니다.",
+    code: "MINECRAFT_PRIVATE_ADDRESS",
+  }, { status: 400 });
 }
 
 function encodeString(value: string) {

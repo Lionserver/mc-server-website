@@ -3,8 +3,11 @@ import Link from "next/link";
 import { DiscordContactWidget } from "@/components/discord-contact-widget";
 
 export const metadata: Metadata = {
-  title: "개인정보 처리방침 — Minecraft.kr",
+  title: "개인정보 처리방침",
   description: "Minecraft.kr이 처리하는 개인정보, 보유기간, 파기, 처리위탁과 국외 이전에 관한 안내",
+  alternates: {
+    canonical: "/privacy",
+  },
 };
 
 export default function PrivacyPage() {

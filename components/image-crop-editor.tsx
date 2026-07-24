@@ -129,12 +129,6 @@ export function ImageCropEditor({ session, onCancel, onApply, onError }: {
     context.drawImage(source, crop.x, crop.y, crop.width, crop.height, 0, 0, spec.width, spec.height);
   }, [pixelUpscale, positionX, positionY, session, sourceReady, spec.height, spec.width, zoom]);
 
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onCancel(); };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onCancel]);
-
   useEffect(() => () => {
     if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
     if (resizeFrameRef.current !== null) window.cancelAnimationFrame(resizeFrameRef.current);
@@ -290,12 +284,12 @@ export function ImageCropEditor({ session, onCancel, onApply, onError }: {
     <Dialog.Portal>
       <Dialog.Overlay className="crop-modal-backdrop" />
       <Dialog.Content className="crop-dialog" aria-modal="true" aria-labelledby="crop-dialog-title" onPointerDownOutside={(event) => event.preventDefault()} onInteractOutside={(event) => event.preventDefault()}>
-      <header><div><span>LIVE IMAGE CROP</span><Dialog.Title asChild><h2 id="crop-dialog-title">{labels[session.kind]} 영역 맞추기</h2></Dialog.Title><Dialog.Description asChild><p>이미지를 움직이는 즉시 실제 저장 결과가 갱신됩니다. 확정하면 {spec.width}×{spec.height} WebP로 자동 변환됩니다.</p></Dialog.Description></div><button type="button" onClick={onCancel} aria-label="크롭 편집기 닫기"><X size={18} /></button></header>
+      <header><div><span>LIVE IMAGE CROP</span><Dialog.Title asChild><h2 id="crop-dialog-title">{labels[session.kind]} 영역 맞추기</h2></Dialog.Title><Dialog.Description asChild><p>이미지를 움직이는 즉시 실제 저장 결과가 갱신됩니다. 확정하면 {spec.width}×{spec.height} WebP로 자동 변환됩니다.</p></Dialog.Description></div><Dialog.Close asChild><button type="button" aria-label="크롭 편집기 닫기"><X size={18} /></button></Dialog.Close></header>
       <div className="crop-workspace">
         <div className="crop-visual-grid">
           <section className="crop-source-panel" aria-labelledby="crop-source-title">
             <div className="crop-panel-heading"><span id="crop-source-title">원본에서 선택</span><b><Move size={13} /> 박스 이동 · 모서리 크기 조절</b></div>
-            <div ref={stageRef} className={`crop-source-stage${canMoveX || canMoveY ? " movable" : " fixed"}`} style={{ aspectRatio: `${session.sourceWidth}/${session.sourceHeight}`, "--source-ratio": session.sourceWidth / session.sourceHeight } as CSSProperties} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} aria-label="원본 이미지와 현재 크롭 사각형">
+            <div ref={stageRef} className={`crop-source-stage${canMoveX || canMoveY ? " movable" : " fixed"}`} style={{ aspectRatio: `${session.sourceWidth}/${session.sourceHeight}`, "--source-ratio": session.sourceWidth / session.sourceHeight } as CSSProperties} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} role="img" aria-label="원본 이미지와 현재 크롭 사각형">
               <img src={session.sourceUrl} alt="선택한 원본" draggable={false} />
               <div className="crop-frame" style={cropFrameStyle}><span>CROP · {spec.width}×{spec.height} · 비율 고정</span>{(["tl", "tr", "bl", "br"] as CropCorner[]).map((corner) => <button key={corner} type="button" className={`corner-${corner}`} aria-label={`${corner === "tl" ? "왼쪽 위" : corner === "tr" ? "오른쪽 위" : corner === "bl" ? "왼쪽 아래" : "오른쪽 아래"} 모서리로 크롭 크기 조절`} onPointerDown={(event) => startResize(corner, event)} onPointerMove={moveResize} onPointerUp={stopResize} onPointerCancel={stopResize} />)}</div>
             </div>
@@ -303,7 +297,7 @@ export function ImageCropEditor({ session, onCancel, onApply, onError }: {
           </section>
           <aside className="crop-result-panel" aria-labelledby="crop-result-title">
             <div className="crop-panel-heading"><span id="crop-result-title">실제 저장 결과</span><b><i className="crop-live-dot" /> LIVE</b></div>
-            <div className="crop-result-preview" style={{ aspectRatio: `${spec.width}/${spec.height}` }}><canvas ref={canvasRef} width={spec.width} height={spec.height} aria-label="실제 저장 결과 미리보기" /></div>
+            <div className="crop-result-preview" style={{ aspectRatio: `${spec.width}/${spec.height}` }}><canvas ref={canvasRef} width={spec.width} height={spec.height} role="img" aria-label="실제 저장 결과 미리보기" /></div>
             <small>{spec.width}×{spec.height} WebP · 표시된 모습 그대로 저장</small>
           </aside>
         </div>
@@ -314,7 +308,7 @@ export function ImageCropEditor({ session, onCancel, onApply, onError }: {
           <label className={canMoveY ? "" : "disabled"}><span>세로 위치 <b>{canMoveY ? `${Math.round(positionY)}%` : "고정"}</b></span><input type="range" min="0" max="100" value={canMoveY ? positionY : 50} disabled={!canMoveY} onChange={(event) => setPositionY(Number(event.target.value))} /></label>
         </div>
       </div>
-      <footer><button type="button" className="crop-reset" onClick={resetCrop}><RotateCcw size={14} /> 중앙으로 초기화</button><div><button type="button" onClick={onCancel}>취소</button><button type="button" className="crop-apply" disabled={applying || !sourceReady} onClick={createCrop}><Crop size={15} /> {applying ? "변환 중…" : sourceReady ? "이 영역으로 적용" : "미리보기 준비 중…"}</button></div></footer>
+      <footer><button type="button" className="crop-reset" onClick={resetCrop}><RotateCcw size={14} /> 중앙으로 초기화</button><div><Dialog.Close asChild><button type="button">취소</button></Dialog.Close><button type="button" className="crop-apply" disabled={applying || !sourceReady} onClick={createCrop}><Crop size={15} /> {applying ? "변환 중…" : sourceReady ? "이 영역으로 적용" : "미리보기 준비 중…"}</button></div></footer>
       </Dialog.Content>
     </Dialog.Portal>
   </Dialog.Root>;

@@ -1,7 +1,8 @@
 import { directoryEnv, ensureDirectorySchema, type DirectoryEnv } from "@/lib/server-directory";
 import { resolveMinecraftEndpoint } from "@/lib/minecraft-ping";
-import { temporaryAdminSession } from "@/lib/admin-temporary-access.mjs";
 import { ensureSiteAnnouncementSchema } from "@/lib/site-announcements";
+import { ensureBridgeSchema } from "@/lib/bridge-api";
+import { normalizeIpAddress } from "@/lib/ip-security.mjs";
 
 export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_EMAIL?: string;
@@ -9,15 +10,12 @@ export interface AdminEnvironment extends DirectoryEnv {
   ADMIN_TOTP_SECRET?: string;
   ADMIN_LOCAL_PREVIEW?: string;
   ADMIN_LOCAL_PASSWORD?: string;
-  ADMIN_TEMP_BYPASS_EMAIL?: string;
-  ADMIN_TEMP_BYPASS_UNTIL?: string;
 }
 
 export type AdminSession = {
   email: string;
   expiresAt: number;
-  authMode: "session" | "temporary-bypass";
-  identitySource?: "sites-user-header" | "configured-actor";
+  authMode: "session";
 };
 export type BlacklistKind = "ip" | "address";
 export type ServerEnforcementKind = "warning" | "suspension" | "blind";
@@ -32,7 +30,9 @@ export async function adminEnv(): Promise<AdminEnvironment> {
 }
 
 export async function ensureAdminSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   await ensureDirectorySchema(db);
+  await ensureBridgeSchema(db);
   await ensureSiteAnnouncementSchema(db);
   const columns = await db.prepare("PRAGMA table_info(directory_servers)").all<{ name: string }>();
   const existing = new Set(columns.results.map((column) => column.name));
@@ -216,14 +216,28 @@ export async function loginAdmin(request: Request, payload: unknown) {
     throw Response.json({ error: "총관리자 인증 환경값이 설정되지 않았습니다." }, { status: 503 });
   }
   if (!validEmail || !validPassword || !validOtp) {
-    const failureCount = (attempt?.failure_count ?? 0) + 1;
-    const blockedUntil = failureCount >= MAX_LOGIN_FAILURES ? now + LOGIN_BLOCK_SECONDS : 0;
-    await environment.DB.prepare(`INSERT INTO admin_login_attempts (fingerprint, failure_count, blocked_until, updated_at)
-      VALUES (?, ?, ?, ?) ON CONFLICT(fingerprint) DO UPDATE SET failure_count = excluded.failure_count,
-      blocked_until = excluded.blocked_until, updated_at = excluded.updated_at`)
-      .bind(fingerprint, failureCount, blockedUntil, now).run();
+    const failure = await environment.DB.prepare(`INSERT INTO admin_login_attempts
+      (fingerprint, failure_count, blocked_until, updated_at)
+      VALUES (?, 1, 0, ?)
+      ON CONFLICT(fingerprint) DO UPDATE SET
+        failure_count = admin_login_attempts.failure_count + 1,
+        blocked_until = CASE
+          WHEN admin_login_attempts.failure_count + 1 >= ?
+            THEN MAX(admin_login_attempts.blocked_until, ?)
+          ELSE admin_login_attempts.blocked_until
+        END,
+        updated_at = excluded.updated_at
+      RETURNING failure_count, blocked_until`)
+      .bind(fingerprint, now, MAX_LOGIN_FAILURES, now + LOGIN_BLOCK_SECONDS)
+      .first<{ failure_count: number; blocked_until: number }>();
+    if (!failure) throw Response.json({ error: "로그인 제한 상태를 확인하지 못했습니다." }, { status: 503 });
+    const failureCount = failure.failure_count;
     await writeAudit(environment.DB, email || "unknown", "admin.login.failed", "session", fingerprint.slice(0, 12), { failureCount });
-    throw Response.json({ error: failureCount >= MAX_LOGIN_FAILURES ? "로그인 시도가 잠겼습니다. 15분 후 다시 시도해 주세요." : "관리자 인증 정보가 일치하지 않습니다." }, { status: 401 });
+    throw Response.json({
+      error: failure.blocked_until > now
+        ? "로그인 시도가 잠겼습니다. 15분 후 다시 시도해 주세요."
+        : "관리자 인증 정보가 일치하지 않습니다.",
+    }, { status: failure.blocked_until > now ? 429 : 401 });
   }
 
   await environment.DB.prepare("DELETE FROM admin_login_attempts WHERE fingerprint = ?").bind(fingerprint).run();
@@ -236,17 +250,11 @@ export async function loginAdmin(request: Request, payload: unknown) {
   return { email: configuredEmail, expiresAt, cookie: sessionCookie(request, token, SESSION_SECONDS) };
 }
 
-export async function requireAdmin(request: Request, options?: { mutating?: boolean }): Promise<{ environment: AdminEnvironment; session: AdminSession; tokenHash: string; temporary: boolean; temporaryBypassExpiresAt: number | null }> {
+export async function requireAdmin(request: Request, options?: { mutating?: boolean }): Promise<{ environment: AdminEnvironment; session: AdminSession; tokenHash: string }> {
   if (options?.mutating) assertSameOrigin(request);
   const environment = await adminEnv();
   await ensureAdminSchema(environment.DB);
   const now = unixNow();
-  const temporarySession = temporaryAdminSession(
-    request.headers.get("oai-authenticated-user-email"),
-    environment.ADMIN_TEMP_BYPASS_EMAIL,
-    environment.ADMIN_TEMP_BYPASS_UNTIL,
-    now,
-  );
   const token = cookieValue(request.headers.get("cookie") ?? "", ADMIN_COOKIE);
   if (token && token.length >= 32) {
     const tokenHash = await sha256Hex(token);
@@ -260,30 +268,17 @@ export async function requireAdmin(request: Request, options?: { mutating?: bool
         environment,
         session: { email: row.admin_email, expiresAt: row.expires_at, authMode: "session" },
         tokenHash,
-        temporary: false,
-        temporaryBypassExpiresAt: temporarySession?.expiresAt ?? null,
       };
     }
-  }
-  if (temporarySession && token !== temporaryBypassOptOutToken(temporarySession.expiresAt)) {
-    const tokenHash = await sha256Hex(`temporary-admin-access|${temporarySession.email}|${temporarySession.expiresAt}`);
-    return {
-      environment,
-      session: { ...temporarySession, authMode: "temporary-bypass" },
-      tokenHash,
-      temporary: true,
-      temporaryBypassExpiresAt: temporarySession.expiresAt,
-    };
   }
   if (token) throw Response.json({ error: "관리자 세션이 만료되었습니다." }, { status: 401 });
   throw Response.json({ error: "총관리자 로그인이 필요합니다." }, { status: 401 });
 }
 
 export async function logoutAdmin(request: Request) {
-  const { environment, session, tokenHash, temporary, temporaryBypassExpiresAt } = await requireAdmin(request, { mutating: true });
-  if (!temporary) await environment.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
-  await writeAudit(environment.DB, session.email, temporary ? "admin.temporary_access.logout" : "admin.logout", "session", tokenHash.slice(0, 12), {});
-  if (temporaryBypassExpiresAt) return temporaryBypassOptOutCookie(request, temporaryBypassExpiresAt);
+  const { environment, session, tokenHash } = await requireAdmin(request, { mutating: true });
+  await environment.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?").bind(tokenHash).run();
+  await writeAudit(environment.DB, session.email, "admin.logout", "session", tokenHash.slice(0, 12), {});
   return expiredSessionCookie(request);
 }
 
@@ -364,8 +359,8 @@ export async function resolveHostIps(address: string) {
       if (!response.ok) return;
       const body = await response.json() as { Answer?: Array<{ type?: number; data?: string }> };
       for (const answer of body.Answer ?? []) {
-        const value = answer.data?.trim().toLowerCase() ?? "";
-        if (isIpAddress(value)) results.add(value);
+        const value = normalizeIpAddress(answer.data?.trim().toLowerCase() ?? "");
+        if (value) results.add(value);
       }
     } catch {
       // A DNS outage must not make server editing unavailable. Ownership verification still
@@ -438,7 +433,8 @@ export function cleanMessage(value: unknown) {
 export function adminErrorResponse(error: unknown) {
   if (error instanceof Response) return error;
   const message = error instanceof Error ? error.message : "unexpected error";
-  return Response.json({ error: message }, { status: 500 });
+  console.error("admin request failed", error);
+  return Response.json({ error: process.env.NODE_ENV === "production" ? "요청을 처리하지 못했습니다." : message }, { status: 500 });
 }
 
 function assertSameOrigin(request: Request) {
@@ -504,9 +500,7 @@ function decodeBase32(value: string) {
 }
 
 function isIpAddress(value: string) {
-  const ipv4 = value.split(".");
-  if (ipv4.length === 4 && ipv4.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255)) return true;
-  return value.includes(":") && /^[0-9a-f:]+$/i.test(value) && value.length <= 45;
+  return normalizeIpAddress(value) !== null;
 }
 
 function sessionCookie(request: Request, token: string, maxAge: number) {
@@ -517,14 +511,6 @@ function sessionCookie(request: Request, token: string, maxAge: number) {
 function expiredSessionCookie(request: Request) {
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return `${ADMIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
-}
-
-function temporaryBypassOptOutToken(expiresAt: number) {
-  return `temporary-disabled-${expiresAt}`;
-}
-
-function temporaryBypassOptOutCookie(request: Request, expiresAt: number) {
-  return sessionCookie(request, temporaryBypassOptOutToken(expiresAt), Math.max(0, expiresAt - unixNow()));
 }
 
 function cookieValue(header: string, name: string) {

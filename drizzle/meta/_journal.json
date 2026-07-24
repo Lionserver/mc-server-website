@@ -162,6 +162,13 @@
       "when": 1784798149935,
       "tag": "0022_watery_steve_rogers",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1784853604521,
+      "tag": "0023_wide_bulldozer",
+      "breakpoints": true
     }
   ]
 }

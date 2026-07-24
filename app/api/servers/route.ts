@@ -6,6 +6,7 @@ import { assertAddressNotBlacklisted, synchronizeServerEnforcements } from "@/li
 import { assertSameOrigin } from "@/lib/user-auth";
 import { ensurePublicDirectorySchema, publicServerList } from "@/lib/public-directory";
 import { descriptionPlainText, parseDescriptionDocument } from "@/lib/server-description";
+import { assertServerCreationAllowed } from "@/lib/request-guards";
 
 export async function GET(request: Request) {
   try {
@@ -50,6 +51,7 @@ export async function POST(request: Request) {
     const input = parseDirectoryInput({ ...body, description: descriptionPlainText(descriptionDocument) });
     const environment = await directoryEnv();
     await ensurePublicDirectorySchema(environment.DB);
+    await assertServerCreationAllowed(environment.DB, request, ownerEmail);
     const resolvedIps = await assertAddressNotBlacklisted(environment.DB, input.address);
     const duplicate = await environment.DB.prepare(`SELECT id FROM directory_servers
       WHERE lower(address) = ? AND port = ? AND deleted_at IS NULL`).bind(input.address.toLowerCase(), input.port).first();

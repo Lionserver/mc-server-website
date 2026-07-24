@@ -157,6 +157,11 @@ type PublicRow = DirectoryServerRow & {
 let schemaPromise: Promise<void> | null = null;
 
 export function ensurePublicDirectorySchema(db: D1Database) {
+  // Production schema is applied from the checked-in Drizzle migrations before
+  // the worker is promoted. Runtime DDL on a cold isolate adds many remote D1
+  // round-trips and can race with normal requests. Keep the compatibility
+  // initializer only for local smoke tests that intentionally start empty.
+  if (process.env.NODE_ENV === "production") return Promise.resolve();
   schemaPromise ??= initializePublicDirectorySchema(db).catch((error) => {
     schemaPromise = null;
     throw error;
@@ -271,15 +276,11 @@ async function initializePublicDirectorySchema(db: D1Database) {
 export async function publicServerList(request: Request) {
   const environment = await directoryEnv();
   await ensurePublicDirectorySchema(environment.DB);
-  await synchronizeBlacklist(environment.DB);
-  await synchronizeServerEnforcements(environment.DB);
-  await synchronizePremiumAuctions(environment.DB);
   const url = new URL(request.url);
   const page = Math.max(1, Number.parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
   const limit = Math.min(100, Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "100", 10) || 100));
   const offset = (page - 1) * limit;
   const now = unixNow();
-  await refreshPublicStatusSnapshots(environment.DB, now);
   const rows = await environment.DB.prepare(`${publicSelectSql()}
     WHERE d.status = 'active' AND d.deleted_at IS NULL
     ORDER BY sponsored DESC, COALESCE(premium_bid_amount, 0) DESC,
@@ -301,11 +302,7 @@ export async function publicServerList(request: Request) {
 
 export async function publicServerDetail(db: D1Database, serverId: string) {
   await ensurePublicDirectorySchema(db);
-  await synchronizeBlacklist(db);
-  await synchronizeServerEnforcements(db);
-  await synchronizePremiumAuctions(db);
   const now = unixNow();
-  await refreshPublicStatusSnapshots(db, now, serverId);
   const row = await db.prepare(`${publicSelectSql()} WHERE d.id = ? AND d.status = 'active' AND d.deleted_at IS NULL LIMIT 1`)
     .bind(now, now - 30 * 86_400, now - 7 * 86_400, now - 14 * 86_400, now - 7 * 86_400,
       now - 14 * 86_400, now, now, serverId)
@@ -664,6 +661,8 @@ async function refreshPublicStatusSnapshots(db: D1Database, now: number, serverI
 export async function collectPublicStatusSnapshots(db: D1Database) {
   await ensurePublicDirectorySchema(db);
   await synchronizeBlacklist(db);
+  await synchronizeServerEnforcements(db);
+  await synchronizePremiumAuctions(db);
   const now = unixNow();
   let recorded = 0;
   for (let batch = 0; batch < MAX_SCHEDULED_STATUS_BATCHES; batch += 1) {
@@ -671,6 +670,16 @@ export async function collectPublicStatusSnapshots(db: D1Database) {
     recorded += batchRecorded;
     if (batchRecorded < SCHEDULED_STATUS_BATCH_SIZE) break;
   }
+  return { recorded, bucketAt: Math.floor(now / STATUS_BUCKET_SECONDS) * STATUS_BUCKET_SECONDS };
+}
+
+export async function refreshPublicDirectoryInBackground(db: D1Database) {
+  await ensurePublicDirectorySchema(db);
+  await synchronizeBlacklist(db);
+  await synchronizeServerEnforcements(db);
+  await synchronizePremiumAuctions(db);
+  const now = unixNow();
+  const recorded = await refreshPublicStatusSnapshots(db, now, undefined, "scheduled");
   return { recorded, bucketAt: Math.floor(now / STATUS_BUCKET_SECONDS) * STATUS_BUCKET_SECONDS };
 }
 

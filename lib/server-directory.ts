@@ -76,6 +76,7 @@ export async function directoryEnv(): Promise<DirectoryEnv> {
 }
 
 export async function ensureDirectorySchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   await db.prepare(`CREATE TABLE IF NOT EXISTS directory_servers (
     id TEXT PRIMARY KEY NOT NULL,
     owner_email TEXT NOT NULL,
@@ -173,6 +174,8 @@ export async function ownerEmailFromRequest(request: Request) {
   if (localPreview && request.headers.get("x-mkr-local-owner") === "minecraft-kr-local-preview") {
     return "owner@minecraft.kr";
   }
+  const platformSessionEmail = request.headers.get("x-mkr-authenticated-owner")?.trim().toLowerCase() ?? "";
+  if (validEmail(platformSessionEmail)) return platformSessionEmail;
   const sessionEmail = (await getOwnerSession(request))?.email.trim().toLowerCase() ?? "";
   if (validEmail(sessionEmail)) return sessionEmail;
   throw Response.json({ error: "로그인 세션이 만료되었습니다. 다시 로그인해 주세요." }, { status: 401 });
@@ -273,7 +276,8 @@ export function directoryErrorResponse(error: unknown) {
   if (/UNIQUE constraint failed: directory_servers\.address, directory_servers\.port/i.test(message)) {
     return Response.json({ error: "이미 등록된 서버 주소와 포트입니다." }, { status: 409 });
   }
-  return Response.json({ error: message }, { status: 500 });
+  console.error("directory request failed", error);
+  return Response.json({ error: process.env.NODE_ENV === "production" ? "요청을 처리하지 못했습니다." : message }, { status: 500 });
 }
 
 function cleanText(value: unknown, name: string, minimum: number, maximum: number) {

@@ -34,6 +34,7 @@ export function isMinecraftNickname(value: string) {
 }
 
 export async function ensureMinecraftProfileSchema(db: D1Database) {
+  if (process.env.NODE_ENV === "production") return;
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS minecraft_profiles (
       nickname_key TEXT PRIMARY KEY NOT NULL,

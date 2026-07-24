@@ -5,17 +5,17 @@ import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, us
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import * as Switch from "@radix-ui/react-switch";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { Area, AreaChart, CartesianGrid, ReferenceDot, ReferenceLine, Tooltip, XAxis, YAxis, type TooltipContentProps } from "recharts";
 import { readThemePreference, storeThemePreference } from "@/lib/browser-preferences.mjs";
 import {
   Activity, ArrowRightLeft, ArrowUpRight, BadgeCheck, Check, CheckCircle2, ChevronDown, ChevronUp, Clock3, Code2, Copy,
   ExternalLink, MessageCircle, Search, ShieldCheck, Signal,
   Star, Ticket, Trophy, Users, X,
 } from "lucide-react";
-import { ServerRegistrationDialog } from "@/components/server-registration-dialog";
 import { MinecraftHead } from "@/components/minecraft-head";
 import { PublicSiteHeader } from "@/components/public-site-header";
+import { useTimedMotion } from "@/components/use-timed-motion";
 import { descriptionFontFamilies, descriptionTextRuns, type DescriptionDocument, type DescriptionTextRun } from "@/lib/server-description";
 
 type Edition = "ALL" | "JE" | "BE";
@@ -109,6 +109,14 @@ type TrendChartPoint = {
 const number = new Intl.NumberFormat("ko-KR");
 const formatPlayers = (value: number) => number.format(value);
 const NEW_SERVER_WINDOW_SECONDS = 7 * 86_400;
+const ServerRegistrationDialog = dynamic(
+  () => import("@/components/server-registration-dialog").then((module) => module.ServerRegistrationDialog),
+  { ssr: false },
+);
+const PlayerTrendChart = dynamic(
+  () => import("@/components/player-trend-chart").then((module) => module.PlayerTrendChart),
+  { ssr: false, loading: () => <div className="trend-chart-frame chart-loading" role="status">접속자 차트를 준비하는 중…</div> },
+);
 
 export default function Home() {
   const router = useRouter();
@@ -120,6 +128,7 @@ export default function Home() {
   const [sort, setSort] = useState<SortKey>("recommended");
   const [servers, setServers] = useState<Server[]>([]);
   const [directoryLoading, setDirectoryLoading] = useState(true);
+  const [directoryError, setDirectoryError] = useState("");
   const [directoryUpdatedAt, setDirectoryUpdatedAt] = useState<number | null>(null);
   const [directoryConnection, setDirectoryConnection] = useState<"connecting" | "live" | "polling">("connecting");
   const [favorites, setFavorites] = useState<string[]>([]);
@@ -134,6 +143,8 @@ export default function Home() {
   const [claimMessage, setClaimMessage] = useState("");
   const [ownerSession, setOwnerSession] = useState<{ email: string } | null>(null);
   const [ownerSessionChecked, setOwnerSessionChecked] = useState(false);
+  const [detailReturnFocusTo, setDetailReturnFocusTo] = useState<HTMLElement | null>(null);
+  const [registrationReturnFocusTo, setRegistrationReturnFocusTo] = useState<HTMLElement | null>(null);
   const selectedIdRef = useRef<string | null>(null);
 
   const changeDirectoryView = useCallback((view: DirectoryView) => {
@@ -166,6 +177,7 @@ export default function Home() {
   }, [showToast]);
 
   const openServer = useCallback(async (server: Server) => {
+    setDetailReturnFocusTo(document.activeElement instanceof HTMLElement ? document.activeElement : null);
     setSelected(server);
     try {
       const response = await fetch(`/api/servers/${server.id}?public=1`, { cache: "no-store" });
@@ -241,8 +253,9 @@ export default function Home() {
       if (!response.ok || !body.servers) throw new Error(body.error ?? "서버 목록을 불러오지 못했습니다.");
       setServers(body.servers);
       setDirectoryUpdatedAt(body.generatedAt ?? Math.floor(Date.now() / 1000));
+      setDirectoryError("");
     } catch (error) {
-      if (!quiet) setToast(error instanceof Error ? error.message : "서버 목록 불러오기 실패");
+      if (!quiet) setDirectoryError(error instanceof Error ? error.message : "서버 목록 불러오기 실패");
     } finally {
       if (!quiet) setDirectoryLoading(false);
     }
@@ -319,7 +332,22 @@ export default function Home() {
       });
       socket.addEventListener("error", () => socket?.close());
     };
-    connect();
+    const start = async () => {
+      setDirectoryConnection("connecting");
+      try {
+        const response = await fetch("/api/realtime/capabilities", { cache: "no-store" });
+        const capabilities = await response.json() as { directory?: boolean };
+        if (!active) return;
+        if (!response.ok || !capabilities.directory) {
+          setDirectoryConnection("polling");
+          return;
+        }
+        connect();
+      } catch {
+        if (active) setDirectoryConnection("polling");
+      }
+    };
+    void start();
     return () => {
       active = false;
       if (reconnect !== null) window.clearTimeout(reconnect);
@@ -332,18 +360,6 @@ export default function Home() {
     document.documentElement.dataset.theme = next;
     const frame = window.requestAnimationFrame(() => setTheme(next));
     return () => window.cancelAnimationFrame(frame);
-  }, []);
-
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setSelected(null);
-        setRegistrationOpen(false);
-        setMobileOpen(false);
-      }
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
   }, []);
 
   useEffect(() => {
@@ -405,6 +421,7 @@ export default function Home() {
       router.push(`/login?returnTo=${encodeURIComponent("/?register=1")}`);
       return;
     }
+    setRegistrationReturnFocusTo(document.activeElement instanceof HTMLElement ? document.activeElement : null);
     setRegistrationOpen(true);
     setMobileOpen(false);
   }
@@ -531,7 +548,7 @@ export default function Home() {
               <div className="small-directory-rule"><ShieldCheck size={15} aria-hidden="true" /><span><b>선정 기준</b> 서버 최초 등록 시각부터 7일 이내 · 공개 인증 완료 서버만 표시 · 30초마다 자동 갱신</span></div>
             </div> : <div className="section-heading"><div><span>SERVER DIRECTORY</span><h2>실시간 서버 리스트</h2></div></div>}
             <div className="filter-bar" id="filters" aria-label="서버 필터">
-              <div className="edition-tabs" aria-label="에디션">
+              <div className="edition-tabs" role="group" aria-label="에디션 필터">
                 {(["ALL", "JE", "BE"] as Edition[]).map((item) => (
                   <button key={item} type="button" className={edition === item ? "active" : ""} aria-pressed={edition === item} onClick={() => setEdition(item)}>
                     {item === "ALL" ? "전체" : item === "JE" ? "Java" : "Bedrock"}
@@ -546,21 +563,21 @@ export default function Home() {
 
             {directoryView === "all" ? <div className="list-head"><span><b>{filtered.length}</b>개 서버</span><div><span>반응형 홍보 배너</span><span>버전</span><span>접속자</span><span>추천</span></div></div> : <div className="list-head featured-list-head"><span><b>{filtered.length}</b>개 {directoryView === "new" ? "신규 서버" : "소규모 서버"}</span><div><span>{directoryView === "new" ? "최근 7일 등록 · 최신순" : "7일 평균 동접 20명 미만 · 추천순"}</span></div></div>}
 
-            <div className={directoryView === "all" ? "directory-results" : "directory-results featured-directory-results"}>
+            <div className={directoryView === "all" ? "directory-results" : "directory-results featured-directory-results"} aria-busy={directoryLoading} aria-live="polite">
               {directoryView === "small" ? (
                 <div className="small-server-group featured-server-group">
                   <div className="group-label"><b>SMALL SERVER RECOMMENDATION</b><span>온라인·신뢰도 우선 추천 · 평균 동접 20명 미만</span></div>
-                  {directoryLoading ? <div className="empty-state"><b>소규모 서버 통계를 계산하는 중</b><p>최근 7일 수집 기록을 확인하고 있습니다.</p></div> : filtered.length > 0 ? filtered.map((server, index) => <SmallServerRow key={server.id} server={server} rank={index + 1} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />) : <div className="empty-state"><b>{smallServerPool.length === 0 ? "선정 기준을 충족한 서버가 없습니다" : "검색 결과 없음"}</b><p>{smallServerPool.length === 0 ? "상태 이력이 수집되고 7일 평균이 20명 미만이면 자동으로 추가됩니다." : "검색어 또는 필터를 변경해 보세요."}</p><button type="button" onClick={resetFilters}>필터 초기화</button></div>}
+                  {directoryLoading ? <div className="empty-state" role="status"><b>소규모 서버 통계를 계산하는 중</b><p>최근 7일 수집 기록을 확인하고 있습니다.</p></div> : directoryError ? <DirectoryLoadError message={directoryError} onRetry={() => void loadServers()} /> : filtered.length > 0 ? filtered.map((server, index) => <SmallServerRow key={server.id} server={server} rank={index + 1} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />) : <div className="empty-state" role="status"><b>{smallServerPool.length === 0 ? "선정 기준을 충족한 서버가 없습니다" : "검색 결과 없음"}</b><p>{smallServerPool.length === 0 ? "상태 이력이 수집되고 7일 평균이 20명 미만이면 자동으로 추가됩니다." : "검색어 또는 필터를 변경해 보세요."}</p><button type="button" onClick={resetFilters}>필터 초기화</button></div>}
                 </div>
               ) : directoryView === "new" ? (
                 <div className="server-group new-server-group featured-server-group">
                   <div className="group-label"><b>NEW SERVER ARRIVALS · 7 DAYS</b><span>최초 등록일 기준 최신순 · 공개 인증 서버만 표시</span></div>
-                  {directoryLoading ? <div className="empty-state"><b>신규 서버를 확인하는 중</b><p>최근 7일 등록 기록을 불러오고 있습니다.</p></div> : filtered.length > 0 ? filtered.map((server, index) => <ServerRow key={server.id} server={server} rank={index + 1} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />) : <div className="empty-state"><b>{newServerPool.length === 0 ? "최근 7일 이내 등록된 서버가 없습니다" : "검색 결과 없음"}</b><p>{newServerPool.length === 0 ? "새 서버가 등록되고 공개 인증을 마치면 자동으로 이 목록에 추가됩니다." : "검색어 또는 필터를 변경해 보세요."}</p><button type="button" onClick={resetFilters}>필터 초기화</button></div>}
+                  {directoryLoading ? <div className="empty-state" role="status"><b>신규 서버를 확인하는 중</b><p>최근 7일 등록 기록을 불러오고 있습니다.</p></div> : directoryError ? <DirectoryLoadError message={directoryError} onRetry={() => void loadServers()} /> : filtered.length > 0 ? filtered.map((server, index) => <ServerRow key={server.id} server={server} rank={index + 1} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />) : <div className="empty-state" role="status"><b>{newServerPool.length === 0 ? "최근 7일 이내 등록된 서버가 없습니다" : "검색 결과 없음"}</b><p>{newServerPool.length === 0 ? "새 서버가 등록되고 공개 인증을 마치면 자동으로 이 목록에 추가됩니다." : "검색어 또는 필터를 변경해 보세요."}</p><button type="button" onClick={resetFilters}>필터 초기화</button></div>}
                 </div>
               ) : (
                 <>
                   {sponsored.length > 0 && <div className="server-group sponsored-group"><div className="group-label"><b>SPONSORED · PREMIUM SHOWCASE</b><span>상단 위치·광고 배지로 강조 · 목록 배너 규격은 일반 서버와 동일</span></div>{sponsored.map((server) => <ServerRow key={server.id} server={server} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />)}</div>}
-                  {directoryLoading ? <div className="empty-state"><b>실시간 서버 목록을 불러오는 중</b><p>등록·인증된 서버만 표시합니다.</p></div> : organic.length > 0 ? <div className="server-group"><div className="group-label"><b>LIVE RANKING</b></div>{organic.map((server, index) => <ServerRow key={server.id} server={server} rank={index + 1} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />)}</div> : <div className="empty-state"><b>{servers.length === 0 ? "공개 인증된 서버가 없습니다" : "검색 결과 없음"}</b><p>{servers.length === 0 ? "운영자센터에서 서버 소유권과 브리지 연결을 완료하면 즉시 표시됩니다." : "검색어 또는 필터를 변경해 보세요."}</p><button type="button" onClick={resetFilters}>전체 서버 보기</button></div>}
+                  {directoryLoading ? <div className="empty-state" role="status"><b>실시간 서버 목록을 불러오는 중</b><p>등록·인증된 서버만 표시합니다.</p></div> : directoryError ? <DirectoryLoadError message={directoryError} onRetry={() => void loadServers()} /> : organic.length > 0 ? <div className="server-group"><div className="group-label"><b>LIVE RANKING</b></div>{organic.map((server, index) => <ServerRow key={server.id} server={server} rank={index + 1} favorite={favorites.includes(server.id)} onFavorite={() => toggleFavorite(server.id)} onCopy={() => copyText(server.address, `${server.address} 주소를 복사했습니다.`)} onOpen={() => void openServer(server)} />)}</div> : <div className="empty-state" role="status"><b>{servers.length === 0 ? "공개 인증된 서버가 없습니다" : "검색 결과 없음"}</b><p>{servers.length === 0 ? "운영자센터에서 서버 소유권과 브리지 연결을 완료하면 즉시 표시됩니다." : "검색어 또는 필터를 변경해 보세요."}</p><button type="button" onClick={resetFilters}>전체 서버 보기</button></div>}
                 </>
               )}
             </div>
@@ -573,14 +590,14 @@ export default function Home() {
       <footer className="site-footer"><div className="container footer-inner"><a className="brand" href="#top"><span className="brand-mark">M</span><span>Minecraft.kr</span></a><nav><a href="#server-list">서버 목록</a><a href="/operator">운영자 센터</a><a href="/terms">이용약관</a><a href="/privacy">개인정보 처리방침</a><a href="mailto:zehelper@gmail.com">문의</a></nav><small>© 2026 Minecraft.kr · Mojang/Microsoft와 제휴되지 않은 독립 서비스입니다.</small></div></footer>
 
       <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelected(null); }}>
-        {selected && <ServerDetail server={selected} onCopy={(value, message) => copyText(value, message)} onMessage={showToast} onRefresh={() => refreshSelected(selected.id)} onClaim={() => void openServerClaim(selected)} />}
+        {selected && <ServerDetail server={selected} returnFocusTo={detailReturnFocusTo} onCopy={(value, message) => copyText(value, message)} onMessage={showToast} onRefresh={() => refreshSelected(selected.id)} onClaim={() => void openServerClaim(selected)} />}
       </Dialog.Root>
 
       <Dialog.Root open={Boolean(claimTarget)} onOpenChange={(open) => { if (!open) { setClaimTarget(null); setClaimResult(null); setClaimMessage(""); } }}>
         {claimTarget && <ClaimServerDialog server={claimTarget} result={claimResult} busy={claimBusy} message={claimMessage} onCreate={createClaim} onVerify={verifyClaim} />}
       </Dialog.Root>
 
-      <ServerRegistrationDialog open={registrationOpen} onOpenChange={setRegistrationOpen} onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => router.push(`/operator?created=${serverId}`), 450); }} />
+      <ServerRegistrationDialog open={registrationOpen} returnFocusTo={registrationReturnFocusTo} onOpenChange={setRegistrationOpen} onMessage={showToast} onCreated={(serverId) => { window.setTimeout(() => router.push(`/operator?created=${serverId}`), 450); }} />
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
@@ -595,33 +612,40 @@ function PromoBanner({ server, large = false }: { server: Server; large?: boolea
   const mobileSourceKind = server.bannerContentTypes[mobileKind] ? mobileKind : server.bannerContentTypes[desktopKind] ? desktopKind : fallbackKind;
   const desktopType = server.bannerContentTypes[desktopSourceKind];
   const mobileType = server.bannerContentTypes[mobileSourceKind];
+  const hasMotion = [desktopType, mobileType].some((type) => type === "image/gif" || type === "video/webm");
+  const motionActive = useTimedMotion(hasMotion ? `${server.id}:${desktopSourceKind}:${mobileSourceKind}` : null);
   const defaultTransform = { focusX: 50, focusY: 50, zoom: 100 };
   const desktopTransform = server.bannerTransforms?.[desktopSourceKind] ?? defaultTransform;
   const mobileTransform = server.bannerTransforms?.[mobileSourceKind] ?? defaultTransform;
   const desktopUrl = `/api/servers/${server.id}/assets/${desktopSourceKind}`;
   const mobileUrl = `/api/servers/${server.id}/assets/${mobileSourceKind}`;
   const generatedStyle = hasAsset ? {
-    "--desktop-banner": `url(${desktopUrl})`,
-    "--mobile-banner": `url(${mobileUrl})`,
+    "--desktop-banner": desktopType === "image/gif" || desktopType === "video/webm" ? "none" : `url(${desktopUrl})`,
+    "--mobile-banner": mobileType === "image/gif" || mobileType === "video/webm" ? "none" : `url(${mobileUrl})`,
   } as CSSProperties : undefined;
-  return <div className={`${large ? "detail-hero-banner" : "server-promo-banner"} theme-${themeFromId(server.id)}${hasAsset ? " generated-asset-banner" : ""}`} style={generatedStyle} aria-label={`${server.name} 반응형 홍보 배너`}>
-    {desktopType === "image/gif" && <img className="banner-gif desktop-banner-gif" src={desktopUrl} style={motionTransformStyle(desktopTransform)} alt="" aria-hidden="true" />}
-    {mobileType === "image/gif" && <img className="banner-gif mobile-banner-gif" src={mobileUrl} style={motionTransformStyle(mobileTransform)} alt="" aria-hidden="true" />}
-    {desktopType === "video/webm" && <video className="banner-webm desktop-banner-webm" style={motionTransformStyle(desktopTransform)} autoPlay loop muted playsInline preload="metadata" aria-hidden="true"><source src={desktopUrl} type="video/webm" /></video>}
-    {mobileType === "video/webm" && <video className="banner-webm mobile-banner-webm" style={motionTransformStyle(mobileTransform)} autoPlay loop muted playsInline preload="metadata" aria-hidden="true"><source src={mobileUrl} type="video/webm" /></video>}
+  return <div className={`${large ? "detail-hero-banner" : "server-promo-banner"} theme-${themeFromId(server.id)}${hasAsset ? " generated-asset-banner" : ""}${hasMotion && !motionActive ? " motion-stopped" : ""}`} style={generatedStyle} aria-label={`${server.name} 반응형 홍보 배너`}>
+    {motionActive && desktopType === "image/gif" && <img className="banner-gif desktop-banner-gif motion-media" src={desktopUrl} style={motionTransformStyle(desktopTransform)} alt="" aria-hidden="true" />}
+    {motionActive && mobileType === "image/gif" && <img className="banner-gif mobile-banner-gif motion-media" src={mobileUrl} style={motionTransformStyle(mobileTransform)} alt="" aria-hidden="true" />}
+    {motionActive && desktopType === "video/webm" && <video className="banner-webm desktop-banner-webm motion-media" style={motionTransformStyle(desktopTransform)} autoPlay loop muted playsInline preload="metadata" aria-hidden="true"><source src={desktopUrl} type="video/webm" /></video>}
+    {motionActive && mobileType === "video/webm" && <video className="banner-webm mobile-banner-webm motion-media" style={motionTransformStyle(mobileTransform)} autoPlay loop muted playsInline preload="metadata" aria-hidden="true"><source src={mobileUrl} type="video/webm" /></video>}
   </div>;
 }
 
 function ServerIcon({ server, detail = false }: { server: Server; detail?: boolean }) {
   const theme = themeFromId(server.id);
   const className = `server-mark${detail ? " detail-mark" : ""} theme-${theme}${server.hasIcon ? " generated-server-icon" : ""}`;
+  const hasMotion = server.hasIcon && (server.iconContentType === "video/webm" || server.iconContentType === "image/gif");
+  const motionActive = useTimedMotion(hasMotion ? `${server.id}:icon` : null);
   if (!server.hasIcon) return <div className={className}>{initials(server.name)}</div>;
   const source = `/api/servers/${server.id}/assets/icon`;
   const animatedStyle = motionTransformStyle(server.iconTransform ?? { focusX: 50, focusY: 50, zoom: 100 });
   return <div className={className} aria-label={`${server.name} 서버 아이콘`}>
+    <span className="server-icon-fallback" aria-hidden="true">{initials(server.name)}</span>
     {server.iconContentType === "video/webm"
-      ? <video src={source} style={animatedStyle} autoPlay loop muted playsInline preload="metadata" aria-hidden="true" />
-      : <img src={source} style={server.iconContentType === "image/gif" ? animatedStyle : undefined} alt="" aria-hidden="true" />}
+      ? motionActive && <video className="motion-media" src={source} style={animatedStyle} autoPlay loop muted playsInline preload="metadata" aria-hidden="true" />
+      : server.iconContentType === "image/gif"
+        ? motionActive && <img className="motion-media" src={source} style={animatedStyle} alt="" aria-hidden="true" />
+        : <img src={source} alt="" aria-hidden="true" />}
   </div>;
 }
 
@@ -649,6 +673,14 @@ function DirectoryFilterSelect({ label, value, options, onValueChange }: {
   </Select.Root></div>;
 }
 
+function DirectoryLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return <div className="empty-state error-state" role="alert">
+    <b>서버 목록에 연결하지 못했습니다</b>
+    <p>{message}</p>
+    <button type="button" onClick={onRetry}>다시 불러오기</button>
+  </div>;
+}
+
 function ClaimServerDialog({ server, result, busy, message, onCreate, onVerify }: {
   server: Server; result: ClaimStart | null; busy: boolean; message: string;
   onCreate: (method: "motd" | "dns") => Promise<void>; onVerify: () => Promise<void>;
@@ -668,39 +700,9 @@ function ClaimServerDialog({ server, result, busy, message, onCreate, onVerify }
   </Dialog.Content></Dialog.Portal>;
 }
 
-function TrendChartTooltip({ active, payload }: Partial<TooltipContentProps<number, string>>) {
-  if (!active || !payload || payload.length === 0) return null;
-  const point = payload[0]?.payload as TrendChartPoint | undefined;
-  if (!point) return null;
-  const source = point.source === "bridge" ? "브리지 실측" : point.source === "mixed" ? "브리지 + 공개 핑" : "공개 핑";
-  return <div className="trend-tooltip" role="status">
-    <div><span>{point.date}{point.isCurrent ? " · 최신" : point.isPeak ? " · 최고" : point.isLow ? " · 최저" : ""}</span><b>{formatPlayers(point.players)}명</b></div>
-    <div className={point.delta !== null && point.delta < 0 ? "trend-delta down" : "trend-delta"}><span>전일 대비</span><strong>{point.delta === null ? "수집 시작" : `${point.delta >= 0 ? "+" : ""}${formatPlayers(point.delta)}명`}</strong></div>
-    <small>정원 대비 {point.capacityRate}%</small><em>{source}</em>
-  </div>;
-}
-
-function PlayerTrendChart({ points, yAxisMax, averagePlayers, serverId }: { points: TrendChartPoint[]; yAxisMax: number; averagePlayers: number; serverId: string }) {
-  const gradientId = `player-trend-${serverId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
-  const currentPoint = points.at(-1);
-  const peakPoint = points.reduce<TrendChartPoint | undefined>((peak, point) => !peak || point.players > peak.players ? point : peak, undefined);
-  return <div className="trend-chart-frame" aria-label={`최근 14일 접속자 5분 기록 ${points.length}개`}>
-    <AreaChart data={points} width="100%" height="100%" responsive accessibilityLayer margin={{ top: 22, right: 16, bottom: 2, left: 0 }}>
-      <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--accent-bright)" stopOpacity={0.38} /><stop offset="70%" stopColor="var(--accent)" stopOpacity={0.1} /><stop offset="100%" stopColor="var(--accent)" stopOpacity={0} /></linearGradient></defs>
-      <CartesianGrid vertical={false} stroke="var(--line)" strokeDasharray="2 5" />
-      <XAxis dataKey="timestamp" type="number" domain={["dataMin", "dataMax"]} tickCount={7} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 7, fontFamily: "ui-monospace, monospace" }} tickFormatter={(value: number) => formatTrendAxis(value)} tickMargin={10} minTickGap={22} />
-      <YAxis width={42} domain={[0, yAxisMax]} tickCount={5} allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: "var(--muted)", fontSize: 7, fontFamily: "ui-monospace, monospace" }} tickFormatter={(value: number) => formatPlayers(value)} />
-      <Tooltip content={<TrendChartTooltip />} cursor={{ stroke: "var(--accent)", strokeWidth: 1, strokeDasharray: "3 3" }} animationDuration={120} wrapperStyle={{ outline: "none" }} />
-      <ReferenceLine y={averagePlayers} stroke="var(--muted)" strokeDasharray="4 4" label={{ value: `AVG ${formatPlayers(averagePlayers)}`, position: "insideTopRight", fill: "var(--muted)", fontSize: 7 }} />
-      <Area type="monotoneX" dataKey="players" name="접속자" stroke="var(--accent-bright)" strokeWidth={2.5} fill={`url(#${gradientId})`} dot={points.length <= 96 ? { r: 2.5, fill: "var(--surface)", stroke: "var(--accent)", strokeWidth: 2 } : false} activeDot={{ r: 5, fill: "var(--surface)", stroke: "var(--accent-bright)", strokeWidth: 2 }} animationDuration={520} />
-      {peakPoint && peakPoint.timestamp !== currentPoint?.timestamp && <ReferenceDot x={peakPoint.timestamp} y={peakPoint.players} r={4} fill="var(--surface)" stroke="var(--ink)" strokeWidth={2} />}
-      {currentPoint && <ReferenceDot x={currentPoint.timestamp} y={currentPoint.players} r={4.5} fill="var(--accent-bright)" stroke="var(--surface)" strokeWidth={2} />}
-    </AreaChart>
-  </div>;
-}
-
-function ServerDetail({ server, onCopy, onMessage, onRefresh, onClaim }: {
+function ServerDetail({ server, returnFocusTo, onCopy, onMessage, onRefresh, onClaim }: {
   server: Server;
+  returnFocusTo: HTMLElement | null;
   onCopy: (value: string, message: string) => void;
   onMessage: (message: string) => void;
   onRefresh: () => Promise<void>;
@@ -713,7 +715,7 @@ function ServerDetail({ server, onCopy, onMessage, onRefresh, onClaim }: {
   const safeEmbedName = escapeEmbedAttribute(server.name);
   const ticketEmbed = `<iframe src="https://minecraft.kr/embed/server/${server.id}" title="${safeEmbedName} Minecraft.kr 서버 탑승권" width="760" height="190" loading="lazy" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" referrerpolicy="strict-origin-when-cross-origin" style="width:100%;max-width:760px;height:190px;border:0;overflow:hidden;display:block"></iframe>`;
   const legacyEmbed = embedMediaType === "video/webm"
-    ? `<a href="https://minecraft.kr/?server=${server.id}"><video src="https://minecraft.kr/api/servers/${server.id}/assets/desktopList" width="468" height="60" autoplay loop muted playsinline aria-label="${safeEmbedName} 서버"></video></a>`
+    ? `<a href="https://minecraft.kr/?server=${server.id}"><video src="https://minecraft.kr/api/servers/${server.id}/assets/desktopList" width="468" height="60" autoplay muted playsinline aria-label="${safeEmbedName} 서버"></video></a>`
     : `<a href="https://minecraft.kr/?server=${server.id}"><img src="https://minecraft.kr/api/servers/${server.id}/assets/desktopList" width="468" height="60" alt="${safeEmbedName} 서버"></a>`;
   const serverCapacity = Math.max(server.capacity, ...server.trend.map((point) => point.maxPlayers), 1);
   const chartPlayers = server.trend.map((point) => point.players);
@@ -758,7 +760,11 @@ function ServerDetail({ server, onCopy, onMessage, onRefresh, onClaim }: {
 
   return <Dialog.Portal>
     <Dialog.Overlay className="modal-backdrop" />
-    <Dialog.Content className="detail-modal" aria-modal="true" aria-labelledby="detail-title">
+    <Dialog.Content className="detail-modal" aria-modal="true" aria-labelledby="detail-title" onCloseAutoFocus={(event) => {
+      if (!returnFocusTo?.isConnected) return;
+      event.preventDefault();
+      returnFocusTo.focus();
+    }}>
       <Dialog.Close asChild><button className="modal-close" type="button" aria-label="상세 닫기"><X size={19} /></button></Dialog.Close>
       <PromoBanner server={server} large />
       <div className="detail-shell">
@@ -942,12 +948,5 @@ function formatTrendMoment(bucketAt: number) {
   const date = new Date(bucketAt * 1000);
   return Number.isNaN(date.getTime()) ? "기록 시간 확인 불가" : new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul", month: "long", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).format(date);
-}
-
-function formatTrendAxis(timestamp: number) {
-  const date = new Date(timestamp);
-  return Number.isNaN(date.getTime()) ? "-" : new Intl.DateTimeFormat("ko-KR", {
-    timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
   }).format(date);
 }
