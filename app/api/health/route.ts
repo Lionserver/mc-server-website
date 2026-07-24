@@ -1,5 +1,5 @@
 import { directoryEnv } from "@/lib/server-directory";
-import { isPbkdf2PasswordHash, isTotpSecret } from "@/lib/admin-credentials.mjs";
+import { isAdminPasswordHash, isTotpSecret } from "@/lib/admin-credentials.mjs";
 
 type ReadinessEnvironment = {
   DB?: D1Database;
@@ -36,7 +36,7 @@ export async function GET() {
       && hasMinimumLength(environment.RESEND_API_KEY, 12)
       && isEmailLike(environment.AUTH_EMAIL_FROM),
     permanentAdminAuth: isEmailLike(environment.ADMIN_EMAIL)
-      && isPbkdf2PasswordHash(environment.ADMIN_PASSWORD_HASH)
+      && isAdminPasswordHash(environment.ADMIN_PASSWORD_HASH)
       && isTotpSecret(environment.ADMIN_TOTP_SECRET),
     votePrivacySecret: hasMinimumLength(environment.VOTE_IP_HASH_SECRET, 32),
     bridge: hasMinimumLength(environment.BRIDGE_ADMIN_TOKEN, 24)

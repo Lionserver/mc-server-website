@@ -4,9 +4,9 @@ import { ensureSiteAnnouncementSchema } from "@/lib/site-announcements";
 import { ensureBridgeSchema } from "@/lib/bridge-api";
 import { normalizeIpAddress } from "@/lib/ip-security.mjs";
 import {
-  isPbkdf2PasswordHash,
+  isAdminPasswordHash,
   isTotpSecret,
-  verifyPbkdf2Password,
+  verifyAdminPassword,
   verifyTotpCode,
 } from "@/lib/admin-credentials.mjs";
 
@@ -227,7 +227,7 @@ export async function loginAdmin(request: Request, payload: unknown) {
   const localPreview = isLocalPreview(request, environment);
   const configuredEmail = configuredAdminEmail(request, environment);
   const credentialsConfigured = localPreview || (
-    isPbkdf2PasswordHash(environment.ADMIN_PASSWORD_HASH)
+    isAdminPasswordHash(environment.ADMIN_PASSWORD_HASH)
     && isTotpSecret(environment.ADMIN_TOTP_SECRET)
   );
   if (!configuredEmail || !credentialsConfigured) {
@@ -236,7 +236,7 @@ export async function loginAdmin(request: Request, payload: unknown) {
   const validEmail = configuredEmail.length > 0 && await constantTimeEqualText(email, configuredEmail);
   const validPassword = localPreview
     ? await constantTimeEqualText(password, environment.ADMIN_LOCAL_PASSWORD ?? "")
-    : await verifyPbkdf2Password(password, environment.ADMIN_PASSWORD_HASH ?? "");
+    : await verifyAdminPassword(password, environment.ADMIN_PASSWORD_HASH ?? "");
   const validOtp = localPreview ? otp === "000000" : await verifyTotpCode(otp, environment.ADMIN_TOTP_SECRET ?? "");
 
   if (!validEmail || !validPassword || !validOtp) {

@@ -6,7 +6,7 @@ import { MAX_TEMPORARY_ADMIN_ACCESS_SECONDS, temporaryAdminSession } from "../li
 import { resolveThemePreference, safeInternalReturnTo } from "../lib/browser-preferences.mjs";
 import { isPrivateHostName, isPrivateOrReservedIp, networkFingerprintAddress, normalizeIpAddress } from "../lib/ip-security.mjs";
 import { announcementPhase, nextAnnouncementTransition } from "../lib/site-announcement-lifecycle.mjs";
-import { isPbkdf2PasswordHash, isTotpSecret, verifyPbkdf2Password, verifyTotpCode } from "../lib/admin-credentials.mjs";
+import { isAdminPasswordHash, isTotpSecret, verifyAdminPassword, verifyTotpCode } from "../lib/admin-credentials.mjs";
 
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -30,11 +30,11 @@ async function render(pathname = "/") {
 }
 
 test("production administrator credential primitives reject malformed values and verify valid credentials", async () => {
-  const passwordHash = "pbkdf2$100000$MDEyMzQ1Njc4OWFiY2RlZg$XM4ByEIgwTj7DZ_FCwdEIrWQJ0zaMek-mE4euvzD3wk";
-  assert.equal(isPbkdf2PasswordHash(passwordHash), true);
-  assert.equal(isPbkdf2PasswordHash(`"${passwordHash}"`), false);
-  assert.equal(await verifyPbkdf2Password("minecraft-admin-test", passwordHash), true);
-  assert.equal(await verifyPbkdf2Password("incorrect-password", passwordHash), false);
+  const passwordHash = "hmac-sha256$1$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY$3mKOEcbSna_CyhbX8wXvIc3279dNWnlGBHUMyUU2AVU";
+  assert.equal(isAdminPasswordHash(passwordHash), true);
+  assert.equal(isAdminPasswordHash(`"${passwordHash}"`), false);
+  assert.equal(await verifyAdminPassword("minecraft-admin-test-password", passwordHash), true);
+  assert.equal(await verifyAdminPassword("incorrect-password", passwordHash), false);
 
   const rfcSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
   assert.equal(isTotpSecret(rfcSecret), true);

@@ -116,10 +116,10 @@ pnpm test:ownership
 - 블랙리스트는 서버 주소 또는 IP를 영구/기간제로 차단합니다. 등록·수정·브리지 발급 단계에서도 다시 검사합니다.
 - `/operator`의 총관리자 직통라인은 서버별 1대1 대화이며 양쪽 미확인 건수를 별도로 관리합니다.
 
-운영용 OTP 자격 증명은 소스 코드에 저장하지 않습니다. 다음 명령으로 PBKDF2 비밀번호 해시, Base32 TOTP 시크릿과 OTP 앱 등록 URI를 생성한 뒤 출력된 값을 배포 환경 변수에 넣습니다.
+운영용 OTP 자격 증명은 소스 코드에 저장하지 않습니다. 다음 명령으로 고엔트로피 관리자 비밀번호, Worker 호환 HMAC-SHA256 검증값, Base32 TOTP 시크릿과 OTP 앱 등록 URI를 생성한 뒤 비밀번호는 비밀번호 관리자에 보관하고 환경값만 배포 환경에 넣습니다.
 
 ```bash
-ADMIN_EMAIL="admin@minecraft.kr" pnpm admin:credentials '12자 이상의 강한 비밀번호'
+ADMIN_EMAIL="admin@minecraft.kr" pnpm admin:credentials
 ```
 
 필수 운영 환경 변수는 `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH`, `ADMIN_TOTP_SECRET`입니다. 관리자 세션은 D1에 해시로 저장되는 8시간 HttpOnly·SameSite Strict 쿠키이며, 변경 요청은 동일 출처만 허용합니다. 5회 인증 실패 시 동일 접속 환경을 15분 동안 잠급니다. 로컬 미리보기에서는 `.dev.vars`의 전용 비밀번호와 OTP `000000`만 localhost에서 사용할 수 있습니다.
