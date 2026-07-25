@@ -15,7 +15,7 @@ export async function GET(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const { environment, session } = await requireAdmin(request, { mutating: true });
+    const { environment, session } = await requireAdmin(request, { mutating: true, stepUp: true });
     if (!environment.MEDIA) return Response.json({ error: "이미지 저장소가 연결되지 않았습니다." }, { status: 503 });
     const cleanup = await cleanupBroadcastImageCache(environment.MEDIA);
     await writeAudit(environment.DB, session.email, "broadcast.cache.cleaned", "r2_cache", "broadcast-images", {

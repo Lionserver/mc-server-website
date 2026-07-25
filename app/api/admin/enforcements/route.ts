@@ -1,5 +1,5 @@
 import {
-  adminErrorResponse, requireAdmin, synchronizeServerEnforcements, writeAudit,
+  adminErrorResponse, prepareAuditWrite, requireAdmin, synchronizeServerEnforcements,
   type ServerEnforcementKind,
 } from "@/lib/admin-security";
 import { synchronizePremiumAuctions } from "@/lib/premium-auction";
@@ -8,7 +8,7 @@ const enforcementKinds = new Set<ServerEnforcementKind>(["warning", "suspension"
 
 export async function POST(request: Request) {
   try {
-    const { environment, session } = await requireAdmin(request, { mutating: true });
+    const { environment, session } = await requireAdmin(request, { mutating: true, stepUp: true });
     const body = await request.json() as Record<string, unknown>;
     const serverId = typeof body.serverId === "string" ? body.serverId : "";
     const kind = typeof body.kind === "string" && enforcementKinds.has(body.kind as ServerEnforcementKind)
@@ -28,16 +28,21 @@ export async function POST(request: Request) {
       .bind(serverId, kind, now).first<{ id: string }>();
     if (duplicate) return Response.json({ error: "같은 종류의 활성 제재가 이미 적용되어 있습니다.", id: duplicate.id }, { status: 409 });
     const id = crypto.randomUUID().replaceAll("-", "");
-    await environment.DB.prepare(`INSERT INTO server_enforcements
-      (id, server_id, kind, reason, status, starts_at, expires_at, created_by, resolved_by, resolved_at,
-        resolution_note, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, NULL, NULL, '', ?, ?)`)
-      .bind(id, serverId, kind, reason, now, expiresAt, session.email, now, now).run();
+    const results = await environment.DB.batch([
+      environment.DB.prepare(`INSERT INTO server_enforcements
+        (id, server_id, kind, reason, status, starts_at, expires_at, created_by, resolved_by, resolved_at,
+          resolution_note, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, NULL, NULL, '', ?, ?)`)
+        .bind(id, serverId, kind, reason, now, expiresAt, session.email, now, now),
+      prepareAuditWrite(environment.DB, session.email, `server.enforcement.${kind}.created`, "server", serverId, {
+        enforcementId: id, serverTitle: server.title, ownerEmail: server.owner_email, kind, reason, expiresAt,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "서버 제재를 생성하지 못했습니다." }, { status: 409 });
+    }
     await synchronizeServerEnforcements(environment.DB);
     await synchronizePremiumAuctions(environment.DB);
-    await writeAudit(environment.DB, session.email, `server.enforcement.${kind}.created`, "server", serverId, {
-      enforcementId: id, serverTitle: server.title, ownerEmail: server.owner_email, kind, reason, expiresAt,
-    });
     return Response.json({ enforcement: { id, serverId, serverTitle: server.title, kind, reason, status: "active", startsAt: now, expiresAt } }, { status: 201 });
   } catch (error) {
     return adminErrorResponse(error);

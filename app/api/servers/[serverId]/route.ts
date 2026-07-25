@@ -2,15 +2,16 @@ import {
   directoryEnv, directoryErrorResponse, optionalOwnerEmail, ownerEmailFromRequest,
   parseDirectoryInput, serializeDirectoryServer, staffProfilesByServer, type DirectoryServerRow,
 } from "@/lib/server-directory";
-import { assertAddressNotBlacklisted } from "@/lib/admin-security";
+import { assertAddressNotBlacklisted, prepareAuditWrite } from "@/lib/admin-security";
 import { ensureOwnershipSchema } from "@/lib/server-ownership";
-import { ensurePremiumAuctionSchema } from "@/lib/premium-auction";
+import { ensurePremiumAuctionSchema, hasActiveFinancialLock } from "@/lib/premium-auction";
 import { assertSameOrigin } from "@/lib/user-auth";
 import { ensurePublicDirectorySchema, normalizePublicUrl, parseStaffProfiles, publicServerDetail } from "@/lib/public-directory";
 import { broadcastDirectoryUpdate } from "@/lib/directory-realtime";
 import { descriptionPlainText, descriptionPosterIds, parseDescriptionDocument } from "@/lib/server-description";
 import { MinecraftProfileLookupError, resolveMinecraftProfiles } from "@/lib/minecraft-profile";
 import { ensureOperatorChannelSchema } from "@/lib/operator-channel";
+import { disconnectChatPrincipal } from "@/lib/chat-realtime-control";
 
 type RouteContext = { params: Promise<{ serverId: string }> | { serverId: string } };
 
@@ -94,7 +95,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       WHERE lower(address) = ? AND port = ? AND id <> ? AND deleted_at IS NULL`).bind(input.address.toLowerCase(), input.port, id).first();
     if (duplicate) return Response.json({ error: "this server address is already registered" }, { status: 409 });
     const endpointChanged = existing.port !== input.port;
-    if (endpointChanged && await hasFinancialLock(environment.DB, id)) {
+    if (endpointChanged && await hasActiveFinancialLock(environment.DB, id)) {
       return Response.json({ error: "진행 중인 입찰·낙찰·프리미엄 광고가 있어 서버 포트를 변경할 수 없습니다." }, { status: 409 });
     }
     let resolvedStaff = staff;
@@ -118,43 +119,86 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
     const resolvedIps = endpointChanged ? await assertAddressNotBlacklisted(environment.DB, input.address) : parseIps(existing.resolved_ips);
     const now = Math.floor(Date.now() / 1000);
+    const mutationUpdatedAt = Math.max(now, existing.updated_at + 1);
     const status = endpointChanged ? "draft" : existing.status;
     const bridgeServerId = endpointChanged ? null : existing.bridge_server_id;
     const descriptionAssets = await environment.DB.prepare("SELECT id, object_key FROM server_description_assets WHERE server_id = ?")
       .bind(id).all<{ id: string; object_key: string }>();
     const unusedDescriptionAssets = descriptionAssets.results.filter((asset) => !posterIds.includes(asset.id));
+    const mutationId = crypto.randomUUID().replaceAll("-", "");
+    const liveMutationGuard = `EXISTS (
+      SELECT 1 FROM admin_audit_logs mutation_guard
+      WHERE mutation_guard.id = ? AND mutation_guard.action = 'server.owner_updated'
+        AND mutation_guard.target_type = 'server' AND mutation_guard.target_id = ?
+    ) AND EXISTS (
+      SELECT 1 FROM directory_servers guarded_server
+      WHERE guarded_server.id = ? AND guarded_server.owner_email = ?
+        AND guarded_server.deleted_at IS NULL AND guarded_server.updated_at = ?
+    )`;
     const statements = [environment.DB.prepare(`UPDATE directory_servers SET title = ?, short_description = ?, description = ?, description_document = ?, edition = ?,
       min_version = ?, max_version = ?, address = ?, port = ?, categories = ?, status = ?, bridge_server_id = ?,
       owner_verification_status = ?, owner_verified_at = ?, discord_url = ?, discord_enabled = ?, website_url = ?, website_enabled = ?,
       kakao_url = ?, kakao_enabled = ?, staff_intro_enabled = ?,
       resolved_ips = ?, updated_at = ?
-      WHERE id = ? AND owner_email = ? AND deleted_at IS NULL`)
+      WHERE id = ? AND owner_email = ? AND deleted_at IS NULL AND updated_at = ?
+        AND status <> 'blacklisted' AND owner_verification_status <> 'disputed'
+        AND (? = 0 OR (
+          NOT EXISTS (
+            SELECT 1 FROM premium_bids WHERE server_id = directory_servers.id
+              AND status IN ('active', 'winner_pending')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_awards WHERE server_id = directory_servers.id
+              AND status IN ('payment_pending', 'scheduled', 'active')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_placements WHERE server_id = directory_servers.id
+              AND status IN ('scheduled', 'active')
+          )
+        ))`)
       .bind(input.title, input.shortDescription, input.description, JSON.stringify(descriptionDocument), input.edition, input.minVersion, input.maxVersion,
         input.address, input.port, JSON.stringify(input.categories), status, bridgeServerId,
         endpointChanged ? "unverified" : existing.owner_verification_status, endpointChanged ? null : existing.owner_verified_at,
         discordUrl, discordEnabled ? 1 : 0, websiteUrl, websiteEnabled ? 1 : 0,
-        kakaoUrl, kakaoEnabled ? 1 : 0, staffIntroEnabled ? 1 : 0, JSON.stringify(resolvedIps), now, id, ownerEmail),
-      environment.DB.prepare("DELETE FROM server_staff_profiles WHERE server_id = ?").bind(id),
-      ...unusedDescriptionAssets.map((asset) => environment.DB.prepare("DELETE FROM server_description_assets WHERE id = ? AND server_id = ?").bind(asset.id, id)),
+        kakaoUrl, kakaoEnabled ? 1 : 0, staffIntroEnabled ? 1 : 0, JSON.stringify(resolvedIps), mutationUpdatedAt,
+        id, ownerEmail, existing.updated_at, endpointChanged ? 1 : 0),
+      environment.DB.prepare(`INSERT INTO admin_audit_logs
+        (id, admin_email, action, target_type, target_id, details, created_at)
+        SELECT ?, ?, 'server.owner_updated', 'server', ?, ?, ? WHERE changes() = 1`)
+        .bind(mutationId, ownerEmail, id, JSON.stringify({ title: input.title, endpointChanged, port: input.port }), now),
+      environment.DB.prepare(`DELETE FROM server_staff_profiles
+        WHERE server_id = ? AND ${liveMutationGuard}`)
+        .bind(id, mutationId, id, id, ownerEmail, mutationUpdatedAt),
+      ...unusedDescriptionAssets.map((asset) => environment.DB.prepare(`DELETE FROM server_description_assets
+        WHERE id = ? AND server_id = ? AND ${liveMutationGuard}`)
+        .bind(asset.id, id, mutationId, id, id, ownerEmail, mutationUpdatedAt)),
       ...resolvedStaff.map((member, index) => environment.DB.prepare(`INSERT INTO server_staff_profiles
         (id, server_id, sort_order, role, nickname, minecraft_uuid, introduction, discord_enabled, discord_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${liveMutationGuard}`)
         .bind(crypto.randomUUID().replaceAll("-", ""), id, index, member.role, member.nickname, member.minecraftUuid, member.introduction,
-          member.discordEnabled ? 1 : 0, member.discordUrl, now, now)),
+          member.discordEnabled ? 1 : 0, member.discordUrl, now, mutationUpdatedAt,
+          mutationId, id, id, ownerEmail, mutationUpdatedAt)),
     ];
     if (endpointChanged && existing.bridge_server_id) {
       statements.push(
-        environment.DB.prepare("DELETE FROM bridge_backends WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_nonces WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_telemetry_history WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_servers WHERE server_id = ?").bind(existing.bridge_server_id),
+        environment.DB.prepare(`DELETE FROM bridge_backends WHERE server_id = ? AND ${liveMutationGuard}`)
+          .bind(existing.bridge_server_id, mutationId, id, id, ownerEmail, mutationUpdatedAt),
+        environment.DB.prepare(`DELETE FROM bridge_nonces WHERE server_id = ? AND ${liveMutationGuard}`)
+          .bind(existing.bridge_server_id, mutationId, id, id, ownerEmail, mutationUpdatedAt),
+        environment.DB.prepare(`DELETE FROM bridge_telemetry_history WHERE server_id = ? AND ${liveMutationGuard}`)
+          .bind(existing.bridge_server_id, mutationId, id, id, ownerEmail, mutationUpdatedAt),
+        environment.DB.prepare(`DELETE FROM bridge_servers WHERE server_id = ? AND ${liveMutationGuard}`)
+          .bind(existing.bridge_server_id, mutationId, id, id, ownerEmail, mutationUpdatedAt),
       );
     }
-    await environment.DB.batch(statements);
+    const results = await environment.DB.batch(statements);
+    if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "서버 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+    }
     if (environment.MEDIA && unusedDescriptionAssets.length) {
       await Promise.all(unusedDescriptionAssets.map((asset) => environment.MEDIA?.delete(asset.object_key).catch(() => undefined)));
     }
-    if (status === "active") await broadcastDirectoryUpdate(environment, id, now).catch(() => false);
+    if (status === "active") await broadcastDirectoryUpdate(environment, id, mutationUpdatedAt).catch(() => false);
     const row = await environment.DB.prepare("SELECT * FROM directory_servers WHERE id = ?").bind(id).first<DirectoryServerRow>();
     const nextStaff = await staffProfilesByServer(environment.DB, [id]);
     return Response.json({ server: serializeDirectoryServer(row as DirectoryServerRow, nextStaff.get(id) ?? []), ownershipReset: endpointChanged });
@@ -178,37 +222,54 @@ export async function DELETE(request: Request, context: RouteContext) {
     if (!existing) return Response.json({ error: "not found" }, { status: 404 });
     if (existing.owner_email !== ownerEmail) return Response.json({ error: "forbidden" }, { status: 403 });
     if (existing.owner_verification_status === "disputed") return Response.json({ error: "소유권 심사 중에는 서버를 삭제할 수 없습니다." }, { status: 423 });
-    if (await hasFinancialLock(environment.DB, id)) return Response.json({ error: "진행 중인 입찰·낙찰·프리미엄 광고가 있어 서버를 삭제할 수 없습니다." }, { status: 409 });
+    if (await hasActiveFinancialLock(environment.DB, id)) return Response.json({ error: "진행 중인 입찰·낙찰·프리미엄 광고가 있어 서버를 삭제할 수 없습니다." }, { status: 409 });
     if (payload.confirmation !== existing.title) return Response.json({ error: "type the exact server title to delete" }, { status: 400 });
     const now = Math.floor(Date.now() / 1000);
-    const assets = await environment.DB.prepare(`SELECT object_key FROM server_assets WHERE server_id = ?
-      UNION ALL SELECT object_key FROM server_description_assets WHERE server_id = ?`).bind(id, id).all<{ object_key: string }>();
+    const purgeAfter = now + 7 * 86_400;
     const statements = [
-      environment.DB.prepare("DELETE FROM server_assets WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_description_assets WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_staff_profiles WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_votes WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM admin_messages WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM operator_channel_messages WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM admin_conversations WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM chat_realtime_tickets WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_ownership_transfers WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_ownership_claims WHERE server_id = ?").bind(id),
-      environment.DB.prepare("UPDATE directory_servers SET deleted_at = ?, status = 'deleted', bridge_server_id = NULL, updated_at = ? WHERE id = ? AND owner_email = ?")
-        .bind(now, now, id, ownerEmail),
+      environment.DB.prepare(`UPDATE directory_servers SET deleted_at = ?, status_before_deletion = status,
+        status = 'deleted', deletion_reason = ?, deleted_by = ?, purge_after = ?, purged_at = NULL, updated_at = ?
+        WHERE id = ? AND owner_email = ? AND deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_bids WHERE server_id = directory_servers.id
+              AND status IN ('active', 'winner_pending')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_awards WHERE server_id = directory_servers.id
+              AND status IN ('payment_pending', 'scheduled', 'active')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_placements WHERE server_id = directory_servers.id
+              AND status IN ('scheduled', 'active')
+          )`)
+        .bind(now, "서버 운영자 요청", ownerEmail, purgeAfter, now, id, ownerEmail),
+      prepareAuditWrite(environment.DB, ownerEmail, "server.owner_quarantined", "server", id, {
+        title: existing.title,
+        quarantine: true,
+        purgeAfter,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+      environment.DB.prepare(`DELETE FROM chat_realtime_tickets
+        WHERE server_id = ? AND EXISTS (
+          SELECT 1 FROM directory_servers quarantined_server
+          WHERE quarantined_server.id = ? AND quarantined_server.deleted_at = ?
+            AND quarantined_server.deleted_by = ? AND quarantined_server.status = 'deleted'
+            AND quarantined_server.updated_at = ?
+        )`).bind(id, id, now, ownerEmail, now),
     ];
-    if (existing.bridge_server_id) {
-      statements.unshift(
-        environment.DB.prepare("DELETE FROM bridge_backends WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_nonces WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_telemetry_history WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_servers WHERE server_id = ?").bind(existing.bridge_server_id),
-      );
+    const results = await environment.DB.batch(statements);
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "서버 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
     }
-    await environment.DB.batch(statements);
+    await disconnectChatPrincipal(environment, {
+      role: "owner",
+      principalEmail: ownerEmail,
+      serverIds: [id],
+    }).catch(() => 0);
     await broadcastDirectoryUpdate(environment, id, now).catch(() => false);
-    if (environment.MEDIA) await Promise.all(assets.results.map((asset) => environment.MEDIA?.delete(asset.object_key).catch(() => undefined)));
-    return new Response(null, { status: 204 });
+    return new Response(null, {
+      status: 204,
+      headers: { "Cache-Control": "no-store", "X-MKR-Purge-After": String(purgeAfter) },
+    });
   } catch (error) {
     return directoryErrorResponse(error);
   }
@@ -221,11 +282,4 @@ function parseIps(value: string) {
   } catch {
     return [];
   }
-}
-
-async function hasFinancialLock(db: D1Database, serverId: string) {
-  return Boolean(await db.prepare(`SELECT 1 locked FROM premium_bids WHERE server_id = ? AND status IN ('active', 'winner_pending', 'winner')
-    UNION ALL SELECT 1 FROM premium_awards WHERE server_id = ? AND status IN ('payment_pending', 'scheduled', 'active')
-    UNION ALL SELECT 1 FROM premium_placements WHERE server_id = ? AND status IN ('scheduled', 'active') LIMIT 1`)
-    .bind(serverId, serverId, serverId).first());
 }

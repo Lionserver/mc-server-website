@@ -10,7 +10,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   try {
     const { auctionId } = await context.params;
     if (!/^[a-f0-9]{32}$/.test(auctionId)) throw Response.json({ error: "유효하지 않은 경매 ID입니다." }, { status: 400 });
-    const { environment, session } = await requireAdmin(request, { mutating: true });
+    const { environment, session } = await requireAdmin(request, { mutating: true, stepUp: true });
     await ensurePremiumAuctionSchema(environment.DB);
     const body = await request.json() as Record<string, unknown>;
     const action = typeof body.action === "string" ? body.action : "";

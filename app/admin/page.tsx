@@ -1,13 +1,21 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRightLeft, Ban, BarChart3, CircleDollarSign, Clock3, Crown, EyeOff, Gavel, HardDrive, LogOut, Megaphone, MessageSquare, PauseCircle, Pencil, Plus, RefreshCw, Save, Search, Server, ShieldAlert, ShieldCheck, Trash2, Trophy } from "lucide-react";
+import { Activity, ArrowRightLeft, Ban, BarChart3, ChevronLeft, ChevronRight, CircleDollarSign, Clock3, Crown, EyeOff, Gavel, HardDrive, KeyRound, LogOut, Megaphone, MessageSquare, PauseCircle, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Server, ShieldAlert, ShieldCheck, Trash2, Trophy } from "lucide-react";
 import { useChatRealtime, type ChatConnectionStatus } from "@/lib/use-chat-realtime";
 import type { ChatRealtimeEvent } from "@/lib/chat-realtime";
 import { announcementPhase } from "@/lib/site-announcement-lifecycle.mjs";
+import {
+  AdminAuditControl,
+  AdminOperationsControl,
+  AdminSecurityControl,
+  PaginatedIdentityControl,
+  type AdminWorkRunner,
+} from "@/app/admin/admin-tool-controls";
 
 type AdminServer = {
   id: string; ownerEmail: string; title: string; address: string; port: number; status: string; deletedAt: number | null;
+  statusBeforeDeletion?: string | null; deletionReason?: string; deletedBy?: string | null; purgeAfter?: number | null; purgedAt?: number | null; recoveryExpired?: boolean;
   votesOverride: number | null; uptime: number | null; premiumManaged: boolean; premiumTier: "none" | "premium";
   baseVotes: number; votes: number; votesAdjustment: number; baseUptime: number; uptimeAdjustment: number; uptimeOverride: number | null;
   premiumStartsAt: number | null; premiumEndsAt: number | null; premiumNote: string; premiumActive: boolean;
@@ -20,7 +28,7 @@ type BlacklistEntry = { id: string; kind: "ip" | "address"; value: string; reaso
 type ServerEnforcement = { id: string; server_id: string; server_title: string; owner_email: string; address: string; port: number; kind: "warning" | "suspension" | "blind"; reason: string; status: string; starts_at: number; expires_at: number | null; created_by: string; resolved_by: string | null; resolved_at: number | null; resolution_note: string; created_at: number; updated_at: number };
 type Conversation = { server_id: string; title: string; owner_email: string; unread_admin: number; last_message: string | null; last_message_at: number | null };
 type Audit = { id: string; admin_email: string; action: string; target_type: string; target_id: string; details: Record<string, unknown>; created_at: number };
-type IdentityAccount = { id: string; email: string; email_verified_at: number; last_login_at: number; identity_verification_status: string; identity_verified_at: number | null; identity_provider: string; identity_reference: string; created_at: number; updated_at: number };
+type IdentityAccount = { id: string; email: string; email_verified_at: number; last_login_at: number; identity_verification_status: string; identity_verified_at: number | null; identity_provider: string; identity_reference_masked: string; created_at: number; updated_at: number };
 type Message = { id: string; sender_role: "admin" | "owner"; sender_email: string; body: string; created_at: number };
 type AdminAnnouncement = {
   id: string; title: string; summary: string; detail: string; status: "draft" | "published" | "archived";
@@ -56,13 +64,13 @@ type AdminAuctionDashboard = {
   currentSlots: { capacity: number; occupied: number; vacancies: number; endsAt: number; placements: AdminAuctionDashboard["placements"] };
 };
 type Overview = {
-  admin: { email: string; expiresAt: number; authMode: "session" | "temporary-bypass" };
-  stats: { totalServers: number; premiumServers: number; blacklistedServers: number; activeEnforcements: number; unreadMessages: number; pendingOwnership: number };
+  admin: { email: string; expiresAt: number; elevatedUntil?: number; authMode: "session" | "temporary-bypass" };
+  stats: { totalServers: number; premiumServers: number; blacklistedServers: number; activeEnforcements: number; unreadMessages: number; pendingOwnership: number; unverifiedAccounts: number };
   servers: AdminServer[]; blacklist: BlacklistEntry[]; enforcements: ServerEnforcement[]; conversations: Conversation[]; audits: Audit[]; identities: IdentityAccount[];
   announcements: AdminAnnouncement[];
   ownership: { claims: AdminOwnershipClaim[]; transfers: AdminOwnershipTransfer[] };
 };
-type Tab = "announcements" | "servers" | "votes" | "enforcements" | "identity" | "ownership" | "premium" | "blacklist" | "messages" | "cache" | "audit";
+type Tab = "announcements" | "servers" | "votes" | "enforcements" | "identity" | "ownership" | "premium" | "blacklist" | "messages" | "cache" | "operations" | "security" | "audit";
 
 const dateTime = (unix: number | null) => unix ? new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" }).format(unix * 1000) : "-";
 const auctionDateTime = (unix: number) => `${new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", dateStyle: "medium", timeStyle: "short" }).format(unix * 1000)} KST`;
@@ -85,6 +93,8 @@ export default function AdminPage() {
   const [busy, setBusy] = useState(false);
   const [latestChatEvent, setLatestChatEvent] = useState<ChatRealtimeEvent | null>(null);
   const [adminNow, setAdminNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [stepUpOpen, setStepUpOpen] = useState(false);
+  const pendingSecureAction = useRef<{ work: () => Promise<void>; message: string } | null>(null);
 
   const loadOverview = useCallback(async () => {
     const response = await fetch("/api/admin/overview", { cache: "no-store" });
@@ -131,6 +141,14 @@ export default function AdminPage() {
     catch (error) { setNotice(error instanceof Error ? error.message : "요청에 실패했습니다."); }
     finally { setBusy(false); }
   };
+  const secureRun: AdminWorkRunner = async (work, message) => {
+    if ((overview?.admin.elevatedUntil ?? 0) > Math.floor(Date.now() / 1000) + 3) {
+      await run(work, message);
+      return;
+    }
+    pendingSecureAction.current = { work, message };
+    setStepUpOpen(true);
+  };
 
   if (checking) return <AdminFrame><div className="admin-loading">총관리자 보안 세션 확인 중…</div></AdminFrame>;
   if (!authenticated) return <AdminLogin onSuccess={async () => { setAuthenticated(true); await loadOverview(); }} />;
@@ -144,7 +162,7 @@ export default function AdminPage() {
   return <AdminFrame>
     <header className="admin-topbar">
       <div><span className="admin-eyebrow">MINECRAFT.KR CONTROL</span><h1>총관리자 시스템</h1></div>
-      <div className="admin-top-actions"><AdminRealtimeBadge status={adminChatConnection} /><span className="admin-session"><ShieldCheck size={15} /> {overview?.admin.email}{overview?.admin.authMode === "temporary-bypass" ? ` · 임시 접근 ${dateTime(overview.admin.expiresAt)} 만료` : ""}</span><button onClick={() => run(loadOverview, "최신 데이터로 갱신했습니다.")} disabled={busy}><RefreshCw size={15} /> 새로고침</button><button onClick={logout}><LogOut size={15} /> 로그아웃</button></div>
+      <div className="admin-top-actions"><AdminRealtimeBadge status={adminChatConnection} /><span className="admin-session"><ShieldCheck size={15} /> {overview?.admin.email}{overview?.admin.authMode === "temporary-bypass" ? ` · 임시 접근 ${dateTime(overview.admin.expiresAt)} 만료` : ""}</span><button className={(overview?.admin.elevatedUntil ?? 0) > adminNow ? "is-elevated" : ""} onClick={() => { pendingSecureAction.current = null; setStepUpOpen(true); }} disabled={busy}><KeyRound size={15} /> {(overview?.admin.elevatedUntil ?? 0) > adminNow ? "재인증 활성" : "보안 재인증"}</button><button onClick={() => run(loadOverview, "최신 데이터로 갱신했습니다.")} disabled={busy}><RefreshCw size={15} /> 새로고침</button><button onClick={logout}><LogOut size={15} /> 로그아웃</button></div>
     </header>
     {overview && <>
       <section className="admin-stats" aria-label="주요 현황">
@@ -159,7 +177,7 @@ export default function AdminPage() {
         {([[
           "announcements", "공지사항", Megaphone
         ], ["servers", "서버 제어", Server
-        ], ["votes", "추천 기록", Trophy], ["enforcements", "서버 제재", ShieldAlert], ["identity", "본인인증", ShieldCheck], ["ownership", "소유권 심사", ArrowRightLeft], ["premium", "프리미엄", Crown], ["blacklist", "블랙리스트", Ban], ["messages", "직통라인", MessageSquare], ["cache", "캐시 정리", HardDrive], ["audit", "감사 로그", BarChart3]] as const).map(([key, label, Icon]) =>
+        ], ["votes", "추천 기록", Trophy], ["enforcements", "서버 제재", ShieldAlert], ["identity", "계정·본인인증", ShieldCheck], ["ownership", "소유권 심사", ArrowRightLeft], ["premium", "프리미엄", Crown], ["blacklist", "블랙리스트", Ban], ["messages", "직통라인", MessageSquare], ["cache", "캐시 정리", HardDrive], ["operations", "운영센터", Activity], ["security", "접속 보안", KeyRound], ["audit", "감사 로그", BarChart3]] as const).map(([key, label, Icon]) =>
           <button key={key} type="button" id={`admin-tab-${key}`} role="tab" aria-selected={tab === key} aria-controls={`admin-tabpanel-${key}`} tabIndex={tab === key ? 0 : -1} className={tab === key ? "active" : ""} onClick={() => setTab(key)} onKeyDown={(event) => {
             if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
             event.preventDefault();
@@ -168,23 +186,33 @@ export default function AdminPage() {
             const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
             tabs[nextIndex]?.focus();
             tabs[nextIndex]?.click();
-          }}><Icon size={16} />{label}{key === "announcements" && overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length > 0 && <b>{overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length}</b>}{key === "enforcements" && overview.stats.activeEnforcements > 0 && <b>{overview.stats.activeEnforcements}</b>}{key === "messages" && overview.stats.unreadMessages > 0 && <b>{overview.stats.unreadMessages}</b>}{key === "ownership" && overview.stats.pendingOwnership > 0 && <b>{overview.stats.pendingOwnership}</b>}{key === "identity" && overview.identities.filter((item) => item.identity_verification_status !== "verified").length > 0 && <b>{overview.identities.filter((item) => item.identity_verification_status !== "verified").length}</b>}</button>)}
+          }}><Icon size={16} />{label}{key === "announcements" && overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length > 0 && <b>{overview.announcements.filter((item) => announcementPhase(item, adminNow) === "active").length}</b>}{key === "enforcements" && overview.stats.activeEnforcements > 0 && <b>{overview.stats.activeEnforcements}</b>}{key === "messages" && overview.stats.unreadMessages > 0 && <b>{overview.stats.unreadMessages}</b>}{key === "ownership" && overview.stats.pendingOwnership > 0 && <b>{overview.stats.pendingOwnership}</b>}{key === "identity" && overview.stats.unverifiedAccounts > 0 && <b>{overview.stats.unverifiedAccounts}</b>}</button>)}
       </nav>
       {notice && <div className="admin-notice" role="status">{notice}</div>}
       <section id={`admin-tabpanel-${tab}`} role="tabpanel" aria-labelledby={`admin-tab-${tab}`} tabIndex={0}>
         {tab === "announcements" && <AnnouncementControl entries={overview.announcements} busy={busy} run={run} refresh={loadOverview} now={adminNow} />}
-        {tab === "servers" && <ServerControl servers={overview.servers} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "servers" && <ServerControl servers={overview.servers} busy={busy} secureRun={secureRun} refresh={loadOverview} />}
         {tab === "votes" && <VoteLogControl servers={overview.servers} />}
-        {tab === "enforcements" && <EnforcementControl entries={overview.enforcements} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} />}
-        {tab === "identity" && <IdentityControl accounts={overview.identities} busy={busy} run={run} refresh={loadOverview} />}
-        {tab === "ownership" && <OwnershipControl claims={overview.ownership.claims} transfers={overview.ownership.transfers} busy={busy} run={run} refresh={loadOverview} />}
-        {tab === "premium" && <PremiumAuctionControl busy={busy} run={run} servers={overview.servers.filter((item) => !item.deletedAt)} />}
-        {tab === "blacklist" && <BlacklistControl entries={overview.blacklist} busy={busy} run={run} refresh={loadOverview} />}
+        {tab === "enforcements" && <EnforcementControl entries={overview.enforcements} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={secureRun} refresh={loadOverview} />}
+        {tab === "identity" && <PaginatedIdentityControl busy={busy} secureRun={secureRun} refreshOverview={loadOverview} />}
+        {tab === "ownership" && <OwnershipControl claims={overview.ownership.claims} transfers={overview.ownership.transfers} busy={busy} secureRun={secureRun} refresh={loadOverview} />}
+        {tab === "premium" && <PremiumAuctionControl busy={busy} run={secureRun} servers={overview.servers.filter((item) => !item.deletedAt)} />}
+        {tab === "blacklist" && <BlacklistControl entries={overview.blacklist} busy={busy} run={secureRun} refresh={loadOverview} />}
         {tab === "messages" && <MessageControl conversations={overview.conversations} servers={overview.servers.filter((item) => !item.deletedAt)} busy={busy} run={run} refresh={loadOverview} realtimeEvent={latestChatEvent} connectionStatus={adminChatConnection} />}
-        {tab === "cache" && <CacheControl busy={busy} run={run} />}
-        {tab === "audit" && <AuditLog entries={overview.audits} />}
+        {tab === "cache" && <CacheControl busy={busy} run={secureRun} />}
+        {tab === "operations" && <AdminOperationsControl busy={busy} secureRun={secureRun} />}
+        {tab === "security" && <AdminSecurityControl busy={busy} secureRun={secureRun} />}
+        {tab === "audit" && <AdminAuditControl />}
       </section>
     </>}
+    <StepUpDialog open={stepUpOpen} busy={busy} onClose={() => { pendingSecureAction.current = null; setStepUpOpen(false); }} onElevated={async (elevatedUntil) => {
+      setOverview((current) => current ? { ...current, admin: { ...current.admin, elevatedUntil } } : current);
+      setStepUpOpen(false);
+      const pending = pendingSecureAction.current;
+      pendingSecureAction.current = null;
+      if (pending) await run(pending.work, pending.message);
+      else setNotice(`고위험 작업 인증이 ${dateTime(elevatedUntil)}까지 활성화됐습니다.`);
+    }} />
   </AdminFrame>;
 }
 
@@ -219,48 +247,205 @@ function AdminLogin({ onSuccess }: { onSuccess: () => Promise<void> }) {
   </section></AdminFrame>;
 }
 
+function StepUpDialog({
+  open,
+  busy,
+  onClose,
+  onElevated,
+}: {
+  open: boolean;
+  busy: boolean;
+  onClose: () => void;
+  onElevated: (elevatedUntil: number) => Promise<void>;
+}) {
+  const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  if (!open) return null;
+  const close = () => {
+    setPassword("");
+    setOtp("");
+    setError("");
+    onClose();
+  };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/admin/sessions/step-up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password, otp }),
+      });
+      const body = await response.json() as { elevatedUntil?: number; error?: string };
+      if (!response.ok || !body.elevatedUntil) throw new Error(body.error || "보안 재인증에 실패했습니다.");
+      setPassword("");
+      setOtp("");
+      await onElevated(body.elevatedUntil);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "보안 재인증에 실패했습니다.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return <div className="admin-stepup-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) close(); }}>
+    <section className="admin-stepup-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-stepup-title">
+      <button type="button" className="admin-stepup-close" onClick={close} disabled={submitting || busy} aria-label="닫기">×</button>
+      <div className="admin-login-mark"><KeyRound /></div>
+      <span className="admin-eyebrow">STEP-UP AUTHENTICATION</span>
+      <h2 id="admin-stepup-title">고위험 작업 재인증</h2>
+      <p>비밀번호와 현재 OTP를 다시 확인합니다. 성공 후 5분 동안 삭제·계정·결제·운영 제어 작업을 실행할 수 있습니다.</p>
+      <form className="admin-login-form" onSubmit={submit}>
+        <label>관리자 비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" autoFocus required /></label>
+        <label>OTP 6자리<input inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, ""))} autoComplete="one-time-code" required /></label>
+        {error && <div className="admin-form-error" role="alert">{error}</div>}
+        <button className="admin-primary" disabled={submitting || busy}>{submitting ? "확인 중…" : "5분 보안 인증"}</button>
+      </form>
+    </section>
+  </div>;
+}
+
 function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
   return <article><span>{icon}</span><div><b>{value.toLocaleString()}</b><small>{label}</small></div></article>;
 }
 
-function ServerControl({ servers, busy, run, refresh }: ControlProps) {
-  const live = servers.filter((item) => !item.deletedAt);
-  const [selectedId, setSelectedId] = useState(live[0]?.id ?? "");
-  const selected = live.find((item) => item.id === selectedId) ?? live[0];
-  const [votesDelta, setVotesDelta] = useState("0"); const [uptimeDelta, setUptimeDelta] = useState("0"); const [confirmation, setConfirmation] = useState(""); const [reason, setReason] = useState("");
-  const selectServer = (id: string) => { setSelectedId(id); setVotesDelta("0"); setUptimeDelta("0"); setConfirmation(""); setReason(""); };
-  if (!selected) return <Empty text="등록된 서버가 없습니다." />;
-  const adjustMetrics = (nextVotesDelta = Number(votesDelta || 0), nextUptimeDelta = Number(uptimeDelta || 0)) => run(async () => {
+function ServerControl({ servers, busy, secureRun, refresh }: Omit<ControlProps, "run"> & { secureRun: AdminWorkRunner }) {
+  const [items, setItems] = useState<AdminServer[]>(servers);
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 50, total: servers.length, totalPages: 1 });
+  const [page, setPage] = useState(1);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [queryInput, setQueryInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState("");
+  const [selectedId, setSelectedId] = useState(servers[0]?.id ?? "");
+  const [votesDelta, setVotesDelta] = useState("0");
+  const [uptimeDelta, setUptimeDelta] = useState("0");
+  const [confirmation, setConfirmation] = useState("");
+  const [reason, setReason] = useState("");
+
+  const loadServers = useCallback(async () => {
+    const params = new URLSearchParams({ page: String(page), limit: "50" });
+    if (query) params.set("q", query);
+    if (statusFilter) params.set("status", statusFilter);
+    setLoading(true);
+    setListError("");
+    try {
+      const response = await fetch(`/api/admin/servers?${params}`, { cache: "no-store" });
+      const body = await response.json() as {
+        items?: AdminServer[];
+        pagination?: { page: number; pageSize: number; total: number; totalPages: number };
+        error?: string;
+      };
+      if (!response.ok || !body.items || !body.pagination) throw new Error(body.error || "서버 목록을 불러오지 못했습니다.");
+      setItems(body.items);
+      setPagination(body.pagination);
+      setSelectedId((current) => body.items?.some((item) => item.id === current) ? current : body.items?.[0]?.id ?? "");
+    } catch (cause) {
+      setListError(cause instanceof Error ? cause.message : "서버 목록을 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }, [page, query, statusFilter]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadServers(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadServers]);
+
+  const selected = items.find((item) => item.id === selectedId) ?? items[0];
+  const selectServer = (id: string) => {
+    setSelectedId(id);
+    setVotesDelta("0");
+    setUptimeDelta("0");
+    setConfirmation("");
+    setReason("");
+  };
+  const refreshAll = async () => {
+    await Promise.all([refresh(), loadServers()]);
+  };
+  const submitSearch = (event: FormEvent) => {
+    event.preventDefault();
+    setPage(1);
+    setQuery(queryInput.trim());
+  };
+  const list = <>
+    <form className="admin-server-search" onSubmit={submitSearch}>
+      <div><Search size={14} /><input value={queryInput} onChange={(event) => setQueryInput(event.target.value)} placeholder="서버명·주소·운영자" /></div>
+      <select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value); setPage(1); }} aria-label="서버 상태"><option value="">전체 상태</option><option value="active">운영</option><option value="draft">초안</option><option value="suspended">정지</option><option value="blacklisted">차단</option><option value="blinded">블라인드</option><option value="deleted">복구함</option></select>
+      <button type="submit">검색</button>
+    </form>
+    {listError && <div className="admin-list-error" role="alert">{listError}</div>}
+    <ServerList servers={items} selectedId={selected?.id ?? ""} onSelect={selectServer} />
+    <nav className="admin-server-pagination" aria-label="서버 목록 페이지">
+      <span>{pagination.total.toLocaleString()}개 · {pagination.page}/{pagination.totalPages}</span>
+      <div><button disabled={loading || pagination.page <= 1} onClick={() => setPage((current) => current - 1)} aria-label="이전 페이지"><ChevronLeft size={14} /></button><button disabled={loading || pagination.page >= pagination.totalPages} onClick={() => setPage((current) => current + 1)} aria-label="다음 페이지"><ChevronRight size={14} /></button></div>
+    </nav>
+  </>;
+  if (!selected) return <ControlLayout list={list}><Empty text={loading ? "서버 목록을 불러오는 중입니다." : "조건에 맞는 서버가 없습니다."} /></ControlLayout>;
+
+  const adjustMetrics = (nextVotesDelta = Number(votesDelta || 0), nextUptimeDelta = Number(uptimeDelta || 0)) => secureRun(async () => {
     await jsonRequest(`/api/admin/servers/${selected.id}`, "PATCH", { action: "adjust_metrics", votesDelta: nextVotesDelta, uptimeDelta: nextUptimeDelta });
-    setVotesDelta("0"); setUptimeDelta("0");
-    await refresh();
+    setVotesDelta("0");
+    setUptimeDelta("0");
+    await refreshAll();
   }, `추천수 ${signedValue(nextVotesDelta)} · 업타임 ${signedValue(nextUptimeDelta, "%")}를 반영했습니다.`);
-  const resetMetrics = () => run(async () => {
+  const resetMetrics = () => secureRun(async () => {
     await jsonRequest(`/api/admin/servers/${selected.id}`, "PATCH", { action: "reset_metric_adjustments" });
-    setVotesDelta("0"); setUptimeDelta("0"); await refresh();
+    setVotesDelta("0");
+    setUptimeDelta("0");
+    await refreshAll();
   }, "추천수와 업타임을 자동 집계값으로 복원했습니다.");
-  const remove = () => run(async () => {
-    const response = await fetch(`/api/admin/servers/${selected.id}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation, reason }) });
-    if (!response.ok) throw new Error((await response.json() as { error?: string }).error || "삭제에 실패했습니다.");
-    setSelectedId(live.find((item) => item.id !== selected.id)?.id ?? ""); await refresh();
-  }, "서버를 삭제했습니다.");
-  return <ControlLayout list={<ServerList servers={live} selectedId={selected.id} onSelect={selectServer} />}>
+  const quarantine = () => secureRun(async () => {
+    const response = await fetch(`/api/admin/servers/${selected.id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation, reason }),
+    });
+    if (!response.ok) throw new Error((await response.json() as { error?: string }).error || "격리 처리에 실패했습니다.");
+    setConfirmation("");
+    setReason("");
+    setStatusFilter("deleted");
+    setPage(1);
+    await refresh();
+  }, "서버를 7일 복구함으로 이동했습니다.");
+  const restore = () => secureRun(async () => {
+    await jsonRequest(`/api/admin/servers/${selected.id}`, "PATCH", { action: "restore" });
+    setStatusFilter("");
+    setPage(1);
+    await refresh();
+  }, `${selected.title} 서버를 격리 전 상태로 복구했습니다.`);
+  const purgeStarted = selected.purgedAt != null;
+  const recoveryExpired = selected.recoveryExpired === true;
+
+  return <ControlLayout list={list}>
     <ControlHeading server={selected} />
-    <section className="admin-metric-adjustments">
-      <article><header><div><span>VOTE ADJUSTMENT</span><b>추천수 증감</b></div><strong>{selected.votes.toLocaleString()}회</strong></header><dl><div><dt>실제 추천</dt><dd>{selected.baseVotes.toLocaleString()}</dd></div><div><dt>관리자 조정</dt><dd>{signedValue(selected.votesAdjustment)}</dd></div></dl><div className="admin-metric-shortcuts"><button disabled={busy} onClick={() => void adjustMetrics(-100, 0)}>-100</button><button disabled={busy} onClick={() => void adjustMetrics(-10, 0)}>-10</button><button disabled={busy} onClick={() => void adjustMetrics(10, 0)}>+10</button><button disabled={busy} onClick={() => void adjustMetrics(100, 0)}>+100</button></div><label>직접 증감값<input type="number" step="1" value={votesDelta} onChange={(event) => setVotesDelta(event.target.value)} /></label></article>
-      <article><header><div><span>UPTIME ADJUSTMENT</span><b>업타임 증감</b></div><strong>{Number(selected.uptime ?? 0).toFixed(2)}%</strong></header><dl><div><dt>30일 실측</dt><dd>{selected.baseUptime.toFixed(2)}%</dd></div><div><dt>관리자 조정</dt><dd>{signedValue(selected.uptimeAdjustment, "%")}</dd></div></dl><div className="admin-metric-shortcuts"><button disabled={busy} onClick={() => void adjustMetrics(0, -5)}>-5%</button><button disabled={busy} onClick={() => void adjustMetrics(0, -1)}>-1%</button><button disabled={busy} onClick={() => void adjustMetrics(0, 1)}>+1%</button><button disabled={busy} onClick={() => void adjustMetrics(0, 5)}>+5%</button></div><label>직접 증감값 (%)<input type="number" step="0.01" value={uptimeDelta} onChange={(event) => setUptimeDelta(event.target.value)} /></label></article>
-    </section>
-    <div className="admin-metric-actions"><button className="admin-primary" onClick={() => void adjustMetrics()} disabled={busy || (!Number(votesDelta) && !Number(uptimeDelta))}>입력한 증감 적용</button><button onClick={() => void resetMetrics()} disabled={busy || (!selected.votesAdjustment && !selected.uptimeAdjustment && selected.votesOverride == null && selected.uptimeOverride == null)}>자동 집계로 초기화</button></div>
-    <section className="admin-danger"><h3><Trash2 size={17} /> 서버 영구 삭제</h3><p>이미지와 브리지 연결 데이터도 함께 제거되며 감사 로그는 보존됩니다.</p><div className="admin-form-grid"><label>삭제 사유<input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="운영 정책 위반 등" /></label><label>서버 이름 확인<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder={selected.title} /></label></div><button className="admin-danger-button" onClick={remove} disabled={busy || confirmation !== selected.title}>삭제 실행</button></section>
+    {selected.deletedAt ? <section className="admin-quarantine-card">
+      <div className="admin-quarantine-icon"><RotateCcw /></div>
+      <div><span className="admin-eyebrow">{purgeStarted ? "PERMANENT PURGE" : "RECOVERY QUARANTINE"}</span><h3>{purgeStarted ? "영구 정리 완료 또는 진행 중" : recoveryExpired ? "복구 기간 만료 · 정리 대기" : "삭제 격리 상태"}</h3><p>{purgeStarted ? "복구 대상 데이터가 영구 정리 단계에 들어가 더 이상 복구할 수 없습니다." : recoveryExpired ? "7일 복구 기간이 끝났으며 추적 작업이 데이터를 영구 정리합니다." : "연결 데이터와 이미지는 보존돼 있으며, 고위험 작업 재인증 후 즉시 복구할 수 있습니다."}</p></div>
+      <dl><div><dt>격리 시각</dt><dd>{dateTime(selected.deletedAt)}</dd></div><div><dt>복구 기한</dt><dd>{dateTime(selected.purgeAfter ?? null)}</dd></div><div><dt>영구 정리</dt><dd>{selected.purgedAt && selected.purgedAt > 0 ? dateTime(selected.purgedAt) : selected.purgedAt ? "진행 중" : recoveryExpired ? "예약 작업 대기" : "-"}</dd></div><div><dt>처리 관리자</dt><dd>{selected.deletedBy || "-"}</dd></div><div><dt>기존 상태</dt><dd>{selected.statusBeforeDeletion || "-"}</dd></div></dl>
+      <blockquote>{selected.deletionReason || "격리 사유가 기록되지 않았습니다."}</blockquote>
+      {!purgeStarted && !recoveryExpired && <button className="admin-primary" disabled={busy} onClick={() => void restore()}><RotateCcw size={15} /> 서버 복구</button>}
+    </section> : <>
+      <section className="admin-metric-adjustments">
+        <article><header><div><span>VOTE ADJUSTMENT</span><b>추천수 증감</b></div><strong>{selected.votes.toLocaleString()}회</strong></header><dl><div><dt>실제 추천</dt><dd>{selected.baseVotes.toLocaleString()}</dd></div><div><dt>관리자 조정</dt><dd>{signedValue(selected.votesAdjustment)}</dd></div></dl><div className="admin-metric-shortcuts"><button disabled={busy} onClick={() => void adjustMetrics(-100, 0)}>-100</button><button disabled={busy} onClick={() => void adjustMetrics(-10, 0)}>-10</button><button disabled={busy} onClick={() => void adjustMetrics(10, 0)}>+10</button><button disabled={busy} onClick={() => void adjustMetrics(100, 0)}>+100</button></div><label>직접 증감값<input type="number" step="1" value={votesDelta} onChange={(event) => setVotesDelta(event.target.value)} /></label></article>
+        <article><header><div><span>UPTIME ADJUSTMENT</span><b>업타임 증감</b></div><strong>{Number(selected.uptime ?? 0).toFixed(2)}%</strong></header><dl><div><dt>30일 실측</dt><dd>{selected.baseUptime.toFixed(2)}%</dd></div><div><dt>관리자 조정</dt><dd>{signedValue(selected.uptimeAdjustment, "%")}</dd></div></dl><div className="admin-metric-shortcuts"><button disabled={busy} onClick={() => void adjustMetrics(0, -5)}>-5%</button><button disabled={busy} onClick={() => void adjustMetrics(0, -1)}>-1%</button><button disabled={busy} onClick={() => void adjustMetrics(0, 1)}>+1%</button><button disabled={busy} onClick={() => void adjustMetrics(0, 5)}>+5%</button></div><label>직접 증감값 (%)<input type="number" step="0.01" value={uptimeDelta} onChange={(event) => setUptimeDelta(event.target.value)} /></label></article>
+      </section>
+      <div className="admin-metric-actions"><button className="admin-primary" onClick={() => void adjustMetrics()} disabled={busy || (!Number(votesDelta) && !Number(uptimeDelta))}>입력한 증감 적용</button><button onClick={() => void resetMetrics()} disabled={busy || (!selected.votesAdjustment && !selected.uptimeAdjustment && selected.votesOverride == null && selected.uptimeOverride == null)}>자동 집계로 초기화</button></div>
+      <section className="admin-danger"><h3><Trash2 size={17} /> 서버 삭제 격리</h3><p>즉시 영구 삭제하지 않습니다. 이미지·브리지·운영 기록을 7일 복구함에 보존하며 언제든 되돌릴 수 있습니다.</p><div className="admin-form-grid"><label>격리 사유<input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="운영 정책 위반 등" /></label><label>서버 이름 확인<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder={selected.title} /></label></div><button className="admin-danger-button" onClick={() => void quarantine()} disabled={busy || confirmation !== selected.title || reason.trim().length < 3}>7일 복구함으로 이동</button></section>
+    </>}
   </ControlLayout>;
 }
 
-function OwnershipControl({ claims, transfers, busy, run, refresh }: {
+function OwnershipControl({ claims, transfers, busy, secureRun, refresh }: {
   claims: AdminOwnershipClaim[]; transfers: AdminOwnershipTransfer[];
-} & Pick<ControlProps, "busy" | "run" | "refresh">) {
+  busy: boolean; secureRun: AdminWorkRunner; refresh: () => Promise<void>;
+}) {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const pending = claims.filter((item) => item.status === "pending_review");
-  const review = (claim: AdminOwnershipClaim, action: "approve" | "reject") => run(async () => {
+  const review = (claim: AdminOwnershipClaim, action: "approve" | "reject") => secureRun(async () => {
     const response = await fetch(`/api/admin/ownership/claims/${claim.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, note: notes[claim.id] ?? "" }),
@@ -283,35 +468,16 @@ function OwnershipControl({ claims, transfers, busy, run, refresh }: {
   </section>;
 }
 
-function IdentityControl({ accounts, busy, run, refresh }: { accounts: IdentityAccount[] } & Pick<ControlProps, "busy" | "run" | "refresh">) {
-  const verify = (account: IdentityAccount) => {
-    const provider = window.prompt("본인인증 제공자명(PASS, NICE 등)을 입력하세요.", account.identity_provider || "PASS");
-    if (!provider?.trim()) return;
-    const reference = window.prompt("인증 결과 확인번호를 입력하세요.", account.identity_reference);
-    if (!reference?.trim()) return;
-    void run(async () => {
-      await jsonRequest(`/api/admin/identity/${account.id}`, "PATCH", { action: "verify", provider: provider.trim(), reference: reference.trim() });
-      await refresh();
-    }, `${account.email} 계정의 본인인증을 승인했습니다.`);
-  };
-  const revoke = (account: IdentityAccount) => {
-    if (!window.confirm(`${account.email} 본인인증을 철회할까요? 진행 중 입찰과 프리미엄 노출도 중단됩니다.`)) return;
-    void run(async () => {
-      await jsonRequest(`/api/admin/identity/${account.id}`, "PATCH", { action: "revoke" });
-      await refresh();
-    }, `${account.email} 계정의 본인인증을 철회했습니다.`);
-  };
-  return <section className="admin-panel"><div className="admin-section-head"><div><span className="admin-eyebrow">IDENTITY GATE</span><h2>운영자 본인인증 관리</h2><p>외부 본인인증 결과의 확인번호를 기록한 계정만 프리미엄 경매에 참여할 수 있습니다.</p></div><span>{accounts.filter((item) => item.identity_verification_status === "verified").length}개 인증</span></div><div className="admin-table-wrap"><table><thead><tr><th>이메일 계정</th><th>이메일 로그인</th><th>본인인증</th><th>제공자 / 확인번호</th><th>최근 로그인</th><th></th></tr></thead><tbody>{accounts.length === 0 ? <tr><td colSpan={6}>가입된 운영자 계정이 없습니다.</td></tr> : accounts.map((account) => <tr key={account.id}><td><b>{account.email}</b><small>{account.id}</small></td><td>{dateTime(account.email_verified_at)}</td><td><Status value={account.identity_verification_status} /></td><td>{account.identity_provider || "-"}<small>{account.identity_reference || "확인번호 없음"}</small></td><td>{dateTime(account.last_login_at)}</td><td>{account.identity_verification_status === "verified" ? <button className="admin-inline-danger" disabled={busy} onClick={() => revoke(account)}>철회</button> : <button disabled={busy} onClick={() => verify(account)}>인증 승인</button>}</td></tr>)}</tbody></table></div></section>;
-}
-
 function PremiumAuctionControl({ busy, run, servers }: { busy: boolean; run: (work: () => Promise<void>, message: string) => Promise<void>; servers: AdminServer[] }) {
   const [data, setData] = useState<AdminAuctionDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [slotCount, setSlotCount] = useState(4);
   const [minimumBid, setMinimumBid] = useState(10000);
   const [minimumIncrement, setMinimumIncrement] = useState(1000);
-  const eligibleServers = servers.filter((server) => server.status === "active" && server.ownerVerificationStatus === "verified");
+  const serverDirectory = useAdminServerSearch(servers, "active");
+  const eligibleServers = serverDirectory.items.filter((server) => server.status === "active" && server.ownerVerificationStatus === "verified");
   const [fillServerId, setFillServerId] = useState(eligibleServers[0]?.id ?? "");
+  const effectiveFillServerId = eligibleServers.some((server) => server.id === fillServerId) ? fillServerId : "";
   const [fillNote, setFillNote] = useState("");
   const [clock, setClock] = useState(() => Date.now());
   const loadInFlight = useRef(false);
@@ -353,7 +519,7 @@ function PremiumAuctionControl({ busy, run, servers }: { busy: boolean; run: (wo
     action({ action: "confirm_payment", awardId: award.id, paymentReference: reference.trim() }, `${award.serverTitle} 결제를 확인하고 광고를 예약했습니다.`);
   };
   const fillVacancy = () => {
-    const server = eligibleServers.find((item) => item.id === fillServerId);
+    const server = eligibleServers.find((item) => item.id === effectiveFillServerId);
     if (!server) return;
     action({ action: "fill_current_slot", serverId: server.id, note: fillNote }, `${server.title} 서버를 현재 빈 광고 슬롯에 배치했습니다.`);
     setFillNote("");
@@ -362,10 +528,11 @@ function PremiumAuctionControl({ busy, run, servers }: { busy: boolean; run: (wo
     <div className="admin-section-head"><div><span className="admin-eyebrow">WEEKLY PREMIUM AUCTION</span><h2>다음 주 최상단 광고 경매</h2></div><Status value={auction.status} /></div>
     <div className="admin-auction-summary"><div><span>광고 주간</span><b>{auctionDateTime(auction.targetStartsAt)} — {auctionDateTime(auction.targetEndsAt)}</b></div><div><span>블라인드 종료</span><b>{auctionDateTime(auction.blindStartsAt)}부터 5분 이내</b></div><div><span>현재 참여</span><b>{data.bids.length}개 서버</b></div><div><span>결제 대기</span><b>{data.awards.filter((item) => item.status === "payment_pending").length}건</b></div></div>
     <div className="admin-auction-history"><span>최근 경매</span>{data.auctions.slice(0, 6).map((item) => <div key={item.id} className={item.id === auction.id ? "current" : ""}><b>{auctionDateTime(item.targetStartsAt).split(" ").slice(0, 3).join(" ")}</b><Status value={item.status} /><small>{item.slotCount}개 슬롯</small></div>)}</div>
+    <label className="admin-inline-server-search"><span>수동 배치 서버 검색</span><div><Search size={14} /><input value={serverDirectory.query} onChange={(event) => serverDirectory.setQuery(event.target.value)} placeholder="서버명 · 주소 · 운영자 이메일" /><small>{serverDirectory.loading ? "검색 중…" : `${eligibleServers.length}개 결과`}</small></div></label>
     <PremiumSlotBoard
       slots={data.currentSlots}
       eligibleServers={eligibleServers}
-      selectedServerId={fillServerId}
+      selectedServerId={effectiveFillServerId}
       note={fillNote}
       busy={busy}
       onSelectServer={setFillServerId}
@@ -447,7 +614,10 @@ function premiumSource(value: string) { return value === "auction" ? "주간 경
 function signedValue(value: number, suffix = "") { return `${value > 0 ? "+" : ""}${Number.isInteger(value) ? value.toLocaleString() : value.toFixed(2)}${suffix}`; }
 
 function EnforcementControl({ entries, servers, busy, run, refresh }: { entries: ServerEnforcement[] } & ControlProps) {
-  const [serverId, setServerId] = useState(servers[0]?.id ?? "");
+  const serverDirectory = useAdminServerSearch(servers);
+  const selectableServers = serverDirectory.items.filter((server) => !server.deletedAt);
+  const [serverId, setServerId] = useState(servers.find((server) => !server.deletedAt)?.id ?? "");
+  const effectiveServerId = selectableServers.some((server) => server.id === serverId) ? serverId : "";
   const [kind, setKind] = useState<ServerEnforcement["kind"]>("warning");
   const [duration, setDuration] = useState("7d");
   const [customExpiry, setCustomExpiry] = useState("");
@@ -459,8 +629,9 @@ function EnforcementControl({ entries, servers, busy, run, refresh }: { entries:
     blind: active.filter((entry) => entry.kind === "blind").length,
   };
   const create = () => run(async () => {
+    if (!effectiveServerId) throw new Error("검색 결과에서 대상 서버를 다시 선택해 주세요.");
     const expiresAt = duration === "manual" ? null : duration === "custom" ? toUnix(customExpiry) : Math.floor(Date.now() / 1000) + Number(duration.replace("d", "")) * 86_400;
-    await jsonRequest("/api/admin/enforcements", "POST", { serverId, kind, reason, expiresAt });
+    await jsonRequest("/api/admin/enforcements", "POST", { serverId: effectiveServerId, kind, reason, expiresAt });
     setReason(""); setCustomExpiry(""); await refresh();
   }, `${enforcementKindLabel(kind)} 조치를 적용했습니다.`);
   const revoke = (entry: ServerEnforcement) => {
@@ -482,12 +653,13 @@ function EnforcementControl({ entries, servers, busy, run, refresh }: { entries:
       <article className="blind"><EyeOff /><span>블라인드<b>{activeCounts.blind}</b><small>목록과 상세에서 숨김</small></span></article>
     </div>
     <div className="admin-enforcement-form">
-      <label><span>1 · 대상 서버</span><select value={serverId} onChange={(event) => setServerId(event.target.value)}><option value="">서버 선택</option>{servers.map((server) => <option key={server.id} value={server.id}>{server.title} · {server.address}</option>)}</select></label>
+      <label><span>대상 서버 검색</span><input value={serverDirectory.query} onChange={(event) => serverDirectory.setQuery(event.target.value)} placeholder="서버명 · 주소 · 운영자" /></label>
+      <label><span>1 · 대상 서버 {serverDirectory.loading ? "· 검색 중" : `· ${selectableServers.length}개`}</span><select value={effectiveServerId} onChange={(event) => setServerId(event.target.value)}><option value="">서버 선택</option>{selectableServers.map((server) => <option key={server.id} value={server.id}>{server.title} · {server.address}</option>)}</select></label>
       <label><span>2 · 조치 종류</span><select value={kind} onChange={(event) => setKind(event.target.value as ServerEnforcement["kind"])}><option value="warning">경고 · 공개 유지</option><option value="suspension">임시 차단 · 공개 중단</option><option value="blind">블라인드 · 검색/상세 숨김</option></select></label>
       <label><span>3 · 적용 기간</span><select value={duration} onChange={(event) => setDuration(event.target.value)}><option value="1d">24시간</option><option value="3d">3일</option><option value="7d">7일</option><option value="30d">30일</option><option value="custom">날짜 직접 지정</option><option value="manual">수동 해제까지</option></select></label>
       {duration === "custom" && <label><span>종료 날짜·시간</span><input type="datetime-local" value={customExpiry} onChange={(event) => setCustomExpiry(event.target.value)} /></label>}
       <label className="reason"><span>4 · 제재 사유</span><textarea value={reason} maxLength={500} onChange={(event) => setReason(event.target.value)} placeholder="운영 정책 위반 내용과 확인 근거를 구체적으로 입력하세요." /></label>
-      <button className={`admin-enforcement-submit ${kind}`} disabled={busy || !serverId || reason.trim().length < 3 || (duration === "custom" && !toUnix(customExpiry))} onClick={() => void create()}>{kind === "warning" ? <ShieldAlert size={16} /> : kind === "suspension" ? <PauseCircle size={16} /> : <EyeOff size={16} />}{enforcementKindLabel(kind)} 적용</button>
+      <button className={`admin-enforcement-submit ${kind}`} disabled={busy || !effectiveServerId || reason.trim().length < 3 || (duration === "custom" && !toUnix(customExpiry))} onClick={() => void create()}>{kind === "warning" ? <ShieldAlert size={16} /> : kind === "suspension" ? <PauseCircle size={16} /> : <EyeOff size={16} />}{enforcementKindLabel(kind)} 적용</button>
     </div>
     <div className="admin-enforcement-section-title"><div><b>현재 적용 중인 서버</b><span>경고 및 노출 제한 상태를 한눈에 확인합니다.</span></div><strong>{active.length} ACTIVE</strong></div>
     <div className="admin-enforcement-active-grid">{active.length === 0 ? <Empty text="현재 적용 중인 서버 제재가 없습니다." /> : active.map((entry) => <article key={entry.id} className={entry.kind}>
@@ -505,9 +677,11 @@ function EnforcementControl({ entries, servers, busy, run, refresh }: { entries:
 function enforcementKindLabel(kind: ServerEnforcement["kind"]) { return kind === "warning" ? "경고" : kind === "suspension" ? "임시 차단" : "블라인드"; }
 
 function VoteLogControl({ servers }: { servers: AdminServer[] }) {
+  const serverDirectory = useAdminServerSearch(servers);
   const [draftQuery, setDraftQuery] = useState("");
   const [query, setQuery] = useState("");
   const [serverId, setServerId] = useState("");
+  const effectiveServerId = !serverId || serverDirectory.items.some((server) => server.id === serverId) ? serverId : "";
   const [page, setPage] = useState(1);
   const [data, setData] = useState<VoteLogResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -522,7 +696,7 @@ function VoteLogControl({ servers }: { servers: AdminServer[] }) {
     try {
       const parameters = new URLSearchParams({ page: String(page), limit: "50" });
       if (query) parameters.set("q", query);
-      if (serverId) parameters.set("serverId", serverId);
+      if (effectiveServerId) parameters.set("serverId", effectiveServerId);
       const response = await fetch(`/api/admin/votes?${parameters}`, { cache: "no-store" });
       const body = await response.json() as VoteLogResponse & { error?: string };
       if (!response.ok) throw new Error(body.error ?? "추천 기록을 불러오지 못했습니다.");
@@ -532,7 +706,7 @@ function VoteLogControl({ servers }: { servers: AdminServer[] }) {
     } finally {
       setLoading(false);
     }
-  }, [page, query, serverId]);
+  }, [page, query, effectiveServerId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load(); }, 0);
@@ -545,7 +719,7 @@ function VoteLogControl({ servers }: { servers: AdminServer[] }) {
     setPage(1);
     if (nextQuery === query) void load(); else setQuery(nextQuery);
   };
-  const reset = () => { setDraftQuery(""); setQuery(""); setServerId(""); setPage(1); };
+  const reset = () => { setDraftQuery(""); setQuery(""); setServerId(""); serverDirectory.setQuery(""); setPage(1); };
   const createBlock = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!blockTarget) return;
@@ -585,9 +759,10 @@ function VoteLogControl({ servers }: { servers: AdminServer[] }) {
       <article><BarChart3 /><span><b>{summary.uniqueSources.toLocaleString()}</b><small>고유 접속 환경</small></span></article>
     </div>
     <form className="admin-vote-search" onSubmit={search}>
-      <label><span>서버 필터</span><select value={serverId} onChange={(event) => { setServerId(event.target.value); setPage(1); }}><option value="">전체 서버</option>{servers.map((server) => <option key={server.id} value={server.id}>{server.title}{server.deletedAt ? " · 삭제됨" : ""}</option>)}</select></label>
+      <label><span>서버 찾기</span><input value={serverDirectory.query} onChange={(event) => serverDirectory.setQuery(event.target.value)} placeholder="서버명 · 주소 · 운영자" /></label>
+      <label><span>서버 필터 {serverDirectory.loading ? "· 검색 중" : ""}</span><select value={effectiveServerId} onChange={(event) => { setServerId(event.target.value); setPage(1); }}><option value="">전체 서버</option>{serverDirectory.items.map((server) => <option key={server.id} value={server.id}>{server.title}{server.deletedAt ? " · 삭제됨" : ""}</option>)}</select></label>
       <label className="query"><span>통합 검색</span><div><Search size={15} /><input value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} placeholder="서버명 · 주소 · 운영자 · 닉네임 · UUID · 정확한 IP" maxLength={100} /></div></label>
-      <button className="admin-primary" type="submit" disabled={loading}>검색</button><button type="button" onClick={reset} disabled={loading || (!query && !serverId)}>초기화</button>
+      <button className="admin-primary" type="submit" disabled={loading}>검색</button><button type="button" onClick={reset} disabled={loading || (!query && !effectiveServerId && !serverDirectory.query)}>초기화</button>
     </form>
     <div className="admin-vote-privacy"><ShieldCheck size={15} /><span><b>IP 최소 수집</b> 원문 IP는 저장하지 않습니다. 화면에는 마스킹 주소만 표시하며 정확한 IP 검색은 복구 불가능한 대조 해시로 처리합니다. IP 정보는 90일 후 자동 삭제됩니다.</span></div>
     {blockTarget && <form className="admin-vote-block-editor" onSubmit={createBlock}>
@@ -613,7 +788,15 @@ function BlacklistControl({ entries, busy, run, refresh }: { entries: BlacklistE
 function MessageControl({ conversations, servers, busy, run, refresh, realtimeEvent, connectionStatus }: { conversations: Conversation[]; realtimeEvent: ChatRealtimeEvent | null; connectionStatus: ChatConnectionStatus } & ControlProps) {
   const initialId = conversations[0]?.server_id ?? servers[0]?.id ?? "";
   const [selectedId, setSelectedId] = useState(initialId); const [messages, setMessages] = useState<Message[]>([]); const [body, setBody] = useState(""); const [loading, setLoading] = useState(false);
-  const options = useMemo(() => servers.map((server) => ({ ...server, conversation: conversations.find((item) => item.server_id === server.id) })), [servers, conversations]);
+  const serverDirectory = useAdminServerSearch(servers);
+  const selectedFromInitial = servers.find((item) => item.id === selectedId);
+  const searchableServers = useMemo(
+    () => selectedFromInitial && !serverDirectory.items.some((item) => item.id === selectedId)
+      ? [selectedFromInitial, ...serverDirectory.items]
+      : serverDirectory.items,
+    [selectedFromInitial, selectedId, serverDirectory.items],
+  );
+  const options = useMemo(() => searchableServers.filter((server) => !server.deletedAt).map((server) => ({ ...server, conversation: conversations.find((item) => item.server_id === server.id) })), [searchableServers, conversations]);
   const load = useCallback(async (id: string) => { if (!id) return; setLoading(true); try { const response = await fetch(`/api/admin/messages/${id}`, { cache: "no-store" }); const data = await response.json() as { messages?: Message[]; error?: string }; if (!response.ok) throw new Error(data.error); setMessages(data.messages ?? []); } finally { setLoading(false); } }, []);
   useEffect(() => { const timer = window.setTimeout(() => { void load(selectedId); }, 0); return () => window.clearTimeout(timer); }, [selectedId, load]);
   useEffect(() => {
@@ -624,9 +807,9 @@ function MessageControl({ conversations, servers, busy, run, refresh, realtimeEv
     }, 0);
     return () => window.clearTimeout(timer);
   }, [load, realtimeEvent, selectedId]);
-  const selected = servers.find((item) => item.id === selectedId);
+  const selected = searchableServers.find((item) => item.id === selectedId);
   if (!selected) return <Empty text="대화할 서버가 없습니다." />;
-  return <section className="admin-chat-layout"><aside className="admin-chat-list"><div className="admin-list-title">서버 운영자</div>{options.map((server) => <button key={server.id} className={selectedId === server.id ? "active" : ""} onClick={() => setSelectedId(server.id)}><span>{server.title}</span><small>{server.ownerEmail}</small>{Boolean(server.conversation?.unread_admin) && <b>{server.conversation?.unread_admin}</b>}</button>)}</aside><div className="admin-chat-panel"><header><div><h2>{selected.title}</h2><span>{selected.ownerEmail} · {selected.address}</span></div><div className="admin-chat-head-actions"><AdminRealtimeBadge status={connectionStatus} /><button onClick={() => load(selected.id)}><RefreshCw size={15} /></button></div></header><div className="admin-chat-messages">{loading ? <Empty text="대화 불러오는 중…" /> : messages.length ? messages.map((message) => <article key={message.id} className={message.sender_role === "admin" ? "mine" : "theirs"}><span>{message.sender_role === "admin" ? "총관리자" : "서버 운영자"}</span><p>{message.body}</p><time>{dateTime(message.created_at)}</time></article>) : <Empty text="첫 메시지를 보내 직통라인을 시작하세요." />}</div><form onSubmit={(event) => { event.preventDefault(); if (!body.trim()) return; void run(async () => { await jsonRequest(`/api/admin/messages/${selected.id}`, "POST", { body }); setBody(""); await load(selected.id); await refresh(); }, "메시지를 전송했습니다."); }}><textarea value={body} maxLength={2000} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="메시지 입력 · Enter 전송 · Shift+Enter 줄바꿈" /><button className="admin-primary" disabled={busy || !body.trim()}>전송</button></form></div></section>;
+  return <section className="admin-chat-layout"><aside className="admin-chat-list"><div className="admin-list-title">서버 운영자</div><label className="admin-chat-search"><Search size={13} /><input value={serverDirectory.query} onChange={(event) => serverDirectory.setQuery(event.target.value)} placeholder="서버·운영자 검색" /><small>{serverDirectory.loading ? "…" : options.length}</small></label>{options.map((server) => <button key={server.id} className={selectedId === server.id ? "active" : ""} onClick={() => setSelectedId(server.id)}><span>{server.title}</span><small>{server.ownerEmail}</small>{Boolean(server.conversation?.unread_admin) && <b>{server.conversation?.unread_admin}</b>}</button>)}</aside><div className="admin-chat-panel"><header><div><h2>{selected.title}</h2><span>{selected.ownerEmail} · {selected.address}</span></div><div className="admin-chat-head-actions"><AdminRealtimeBadge status={connectionStatus} /><button onClick={() => load(selected.id)}><RefreshCw size={15} /></button></div></header><div className="admin-chat-messages">{loading ? <Empty text="대화 불러오는 중…" /> : messages.length ? messages.map((message) => <article key={message.id} className={message.sender_role === "admin" ? "mine" : "theirs"}><span>{message.sender_role === "admin" ? "총관리자" : "서버 운영자"}</span><p>{message.body}</p><time>{dateTime(message.created_at)}</time></article>) : <Empty text="첫 메시지를 보내 직통라인을 시작하세요." />}</div><form onSubmit={(event) => { event.preventDefault(); if (!body.trim()) return; void run(async () => { await jsonRequest(`/api/admin/messages/${selected.id}`, "POST", { body }); setBody(""); await load(selected.id); await refresh(); }, "메시지를 전송했습니다."); }}><textarea value={body} maxLength={2000} onChange={(event) => setBody(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="메시지 입력 · Enter 전송 · Shift+Enter 줄바꿈" /><button className="admin-primary" disabled={busy || !body.trim()}>전송</button></form></div></section>;
 }
 
 function AdminRealtimeBadge({ status }: { status: ChatConnectionStatus }) {
@@ -811,11 +994,38 @@ function announcementPhaseLabel(phase: string) {
   } as Record<string, string>)[phase] ?? phase;
 }
 
-function AuditLog({ entries }: { entries: Audit[] }) {
-  return <section className="admin-panel"><div className="admin-section-head"><div><span className="admin-eyebrow">IMMUTABLE TRAIL</span><h2>관리자 감사 로그</h2></div><span>최근 {entries.length}건</span></div><div className="admin-table-wrap"><table><thead><tr><th>시각</th><th>관리자</th><th>작업</th><th>대상</th><th>요약</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id}><td>{dateTime(entry.created_at)}</td><td>{entry.admin_email}</td><td><code>{entry.action}</code></td><td>{entry.target_type}<small>{entry.target_id}</small></td><td className="admin-json">{JSON.stringify(entry.details)}</td></tr>)}</tbody></table></div></section>;
-}
-
 type ControlProps = { servers: AdminServer[]; busy: boolean; run: (work: () => Promise<void>, message: string) => Promise<void>; refresh: () => Promise<void> };
+function useAdminServerSearch(initial: AdminServer[], status = "") {
+  const [query, setQuery] = useState("");
+  const [items, setItems] = useState<AdminServer[]>(() => initial.slice(0, 50));
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const parameters = new URLSearchParams({ page: "1", limit: "50" });
+      if (query.trim()) parameters.set("q", query.trim());
+      if (status) parameters.set("status", status);
+      setLoading(true);
+      void fetch(`/api/admin/servers?${parameters}`, { cache: "no-store", signal: controller.signal })
+        .then(async (response) => {
+          const body = await response.json() as { items?: AdminServer[]; error?: string };
+          if (!response.ok || !body.items) throw new Error(body.error || "서버 검색에 실패했습니다.");
+          setItems(body.items);
+        })
+        .catch((error) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) setItems([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query, status]);
+  return { query, setQuery, items, loading };
+}
 function ControlLayout({ list, children }: { list: React.ReactNode; children: React.ReactNode }) { return <section className="admin-control-layout"><aside className="admin-server-list"><div className="admin-list-title">서버 목록</div>{list}</aside><div className="admin-control-panel">{children}</div></section>; }
 function ServerList({ servers, selectedId, onSelect, premium = false }: { servers: AdminServer[]; selectedId: string; onSelect: (id: string) => void; premium?: boolean }) { return <>{servers.map((server) => <button key={server.id} className={selectedId === server.id ? "active" : ""} onClick={() => onSelect(server.id)}><span>{server.title}{premium && server.premiumActive && <Crown size={13} />}</span><small>{server.address}:{server.port}</small><Status value={server.status} /></button>)}</>; }
 function ControlHeading({ server }: { server: AdminServer }) { return <header className="admin-control-heading"><div><span className="admin-eyebrow">SERVER CONTROL</span><h2>{server.title}</h2><p>{server.ownerEmail} · <code>{server.address}:{server.port}</code></p></div><Status value={server.status} /></header>; }

@@ -4,7 +4,13 @@ export async function GET(request: Request) {
   try {
     const { session } = await requireAdmin(request);
     return Response.json(
-      { authenticated: true, email: session.email, expiresAt: session.expiresAt, authMode: session.authMode },
+      {
+        authenticated: true,
+        email: session.email,
+        expiresAt: session.expiresAt,
+        elevatedUntil: session.elevatedUntil,
+        authMode: session.authMode,
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
@@ -16,7 +22,13 @@ export async function POST(request: Request) {
   try {
     const result = await loginAdmin(request, await request.json());
     return Response.json(
-      { authenticated: true, email: result.email, expiresAt: result.expiresAt, authMode: "session" },
+      {
+        authenticated: true,
+        email: result.email,
+        expiresAt: result.expiresAt,
+        elevatedUntil: result.elevatedUntil,
+        authMode: "session",
+      },
       { headers: { "Set-Cookie": result.cookie, "Cache-Control": "no-store" } },
     );
   } catch (error) {

@@ -1,4 +1,4 @@
-import { adminErrorResponse, requireAdmin, writeAudit } from "@/lib/admin-security";
+import { adminErrorResponse, prepareAuditWrite, requireAdmin } from "@/lib/admin-security";
 import { ensurePublicDirectorySchema } from "@/lib/public-directory";
 import { synchronizeVoteSourceBlocks } from "@/lib/vote-source";
 
@@ -35,16 +35,21 @@ export async function POST(request: Request) {
     if (existing) return Response.json({ error: "이미 추천 차단 중인 접속 환경입니다.", id: existing.id }, { status: 409 });
 
     const id = crypto.randomUUID().replaceAll("-", "");
-    await environment.DB.prepare(`INSERT INTO vote_source_blocks
-      (id, source_ip_hash, source_ip_masked, source_ip_version, reason, status, expires_at,
-        created_by, resolved_by, resolved_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL, ?, ?)`)
-      .bind(id, vote.source_ip_hash, vote.source_ip_masked, vote.source_ip_version, reason,
-        expiresAt, session.email, now, now).run();
-    await writeAudit(environment.DB, session.email, "vote_source.blocked", "vote_source", id, {
-      voteId, serverId: vote.server_id, serverTitle: vote.server_title, nickname: vote.nickname,
-      ipMasked: vote.source_ip_masked, reason, expiresAt,
-    });
+    const results = await environment.DB.batch([
+      environment.DB.prepare(`INSERT INTO vote_source_blocks
+        (id, source_ip_hash, source_ip_masked, source_ip_version, reason, status, expires_at,
+          created_by, resolved_by, resolved_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL, ?, ?)`)
+        .bind(id, vote.source_ip_hash, vote.source_ip_masked, vote.source_ip_version, reason,
+          expiresAt, session.email, now, now),
+      prepareAuditWrite(environment.DB, session.email, "vote_source.blocked", "vote_source", id, {
+        voteId, serverId: vote.server_id, serverTitle: vote.server_title, nickname: vote.nickname,
+        ipMasked: vote.source_ip_masked, reason, expiresAt,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "추천 차단을 생성하지 못했습니다." }, { status: 409 });
+    }
     return Response.json({ block: { id, ipMasked: vote.source_ip_masked, reason, expiresAt, status: "active" } }, { status: 201 });
   } catch (error) {
     return adminErrorResponse(error);

@@ -2,10 +2,18 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { CHAT_CONNECTION_SECONDS, consumeChatRealtimeTicket, realtimeRoomName } from "../lib/chat-realtime";
+import {
+  activeFeatureBlock,
+  expireFeatureControls,
+  runTrackedAdminJob,
+  type ActiveFeatureBlock,
+  type AdminFeatureKey,
+} from "../lib/admin-operations";
 import { cleanupBroadcastImageCache } from "../lib/minecraft-stream-cache";
 import { collectPublicStatusSnapshots, refreshPublicDirectoryInBackground } from "../lib/public-directory";
 import { hasOwnerSessionCookie, resolveOwnerSessionEmail, trustedPlatformUserEmail } from "../lib/user-auth";
 import { cleanupExpiredApplicationData } from "../lib/maintenance";
+import { purgeExpiredServerQuarantines } from "../lib/server-quarantine";
 export { ChatRoom } from "./chat-room";
 export { DirectoryLive } from "./directory-live";
 
@@ -41,13 +49,26 @@ interface ExecutionContext {
 
 const worker = {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(collectPublicStatusSnapshots(env.DB));
-    ctx.waitUntil(cleanupExpiredApplicationData(env.DB));
-    if (env.MEDIA) ctx.waitUntil(cleanupBroadcastImageCache(env.MEDIA));
+    ctx.waitUntil(runScheduledOperations(env));
   },
 
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+    const controlledFeature = await publicWriteFeature(request, url);
+    if (controlledFeature) {
+      let blocked: ActiveFeatureBlock | null;
+      try {
+        blocked = await activeFeatureBlock(env.DB, controlledFeature);
+      } catch (error) {
+        console.error("public write operations guard failed", {
+          featureKey: controlledFeature,
+          name: error instanceof Error ? error.name : "unknown",
+        });
+        return secureResponse(operationsGuardUnavailableResponse(), false, true);
+      }
+      if (blocked) return secureResponse(featureDisabledResponse(blocked), false, true);
+    }
+
     if (request.method === "GET" && url.pathname === "/api/servers" && shouldRunDirectoryMaintenance()) {
       ctx.waitUntil(refreshPublicDirectoryInBackground(env.DB).catch((error) => {
         console.error("directory background maintenance failed", error);
@@ -70,9 +91,11 @@ const worker = {
         return new Response("invalid realtime scope", { status: 403 });
       }
       if (ticket.role === "owner") {
-        const authorized = await env.DB.prepare(`SELECT 1 authorized FROM directory_servers
-          WHERE id = ? AND owner_email = ? AND deleted_at IS NULL
-            AND (? <> 'operators' OR status = 'active' AND owner_verification_status = 'verified')
+        const authorized = await env.DB.prepare(`SELECT 1 authorized FROM directory_servers d
+          LEFT JOIN user_accounts a ON a.email = d.owner_email
+          WHERE d.id = ? AND d.owner_email = ? AND d.deleted_at IS NULL
+            AND (a.id IS NULL OR a.account_status = 'active')
+            AND (? <> 'operators' OR d.status = 'active' AND d.owner_verification_status = 'verified')
           LIMIT 1`).bind(ticket.server_id, ticket.principal_email, ticket.scope).first();
         if (!authorized) return new Response("realtime authorization changed", { status: 403 });
       }
@@ -131,6 +154,126 @@ const worker = {
 
 let lastDirectoryMaintenanceAt = 0;
 let lastPrivacyCleanupAt = 0;
+
+async function runScheduledOperations(env: Env) {
+  await expireFeatureControls(env.DB).catch((error) => {
+    console.error("feature control expiry failed", { name: error instanceof Error ? error.name : "unknown" });
+  });
+  const tasks = [
+    {
+      key: "public_status_snapshots",
+      promise: runTrackedAdminJob(env.DB, "public_status_snapshots", "scheduled",
+        () => collectPublicStatusSnapshots(env.DB)),
+    },
+    {
+      key: "application_retention_cleanup",
+      promise: runTrackedAdminJob(env.DB, "application_retention_cleanup", "scheduled",
+        () => cleanupExpiredApplicationData(env.DB)),
+    },
+    {
+      key: "server_quarantine_purge",
+      promise: runTrackedAdminJob(env.DB, "server_quarantine_purge", "scheduled",
+        () => purgeExpiredServerQuarantines(env)),
+    },
+    {
+      key: "broadcast_cache_cleanup",
+      promise: runTrackedAdminJob(env.DB, "broadcast_cache_cleanup", "scheduled", () => {
+        if (!env.MEDIA) throw new Error("MEDIA binding is unavailable");
+        return cleanupBroadcastImageCache(env.MEDIA);
+      }),
+    },
+  ] as const;
+  const results = await Promise.allSettled(tasks.map((task) => task.promise));
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error("scheduled operations job failed", {
+        jobKey: tasks[index].key,
+        name: result.reason instanceof Error ? result.reason.name : "unknown",
+      });
+    }
+  });
+}
+
+async function publicWriteFeature(request: Request, url: URL): Promise<AdminFeatureKey | null> {
+  if (!new Set(["POST", "PATCH", "PUT", "DELETE"]).has(request.method.toUpperCase())) return null;
+  const pathname = url.pathname;
+  if (!isApiPath(pathname) || killSwitchExemptPath(pathname)) return null;
+
+  if (request.method === "POST" && pathname === "/api/realtime/ticket" && await requestsAdminRealtimeTicket(request)) {
+    return null;
+  }
+  if (request.method === "POST" && pathname === "/api/servers") return "server_registration";
+  if (/^\/api\/servers\/[^/]+\/assets$/.test(pathname)) return "media_uploads";
+  if (/^\/api\/servers\/[^/]+\/description-assets(?:\/[^/]+)?$/.test(pathname)) return "media_uploads";
+  if (/^\/api\/servers\/[^/]+\/bridge(?:\/verify)?$/.test(pathname)) return "bridge_provisioning";
+  if (/^\/api\/servers\/[^/]+\/votes$/.test(pathname)) return "votes";
+  if (/^\/api\/servers\/[^/]+$/.test(pathname)) return "server_management";
+  if (pathAtOrBelow(pathname, "/api/ownership")) return "ownership";
+  if (pathname === "/api/premium/auction") return "premium_bids";
+  if (pathAtOrBelow(pathname, "/api/support") || pathname === "/api/operator/channel"
+    || pathname === "/api/realtime/ticket") return "messaging";
+  if (pathname === "/api/bridge/telemetry") return "bridge_telemetry";
+  if (pathname === "/api/bridge/provision" || pathname === "/api/bridge/verify") return "bridge_provisioning";
+  return "public_writes";
+}
+
+function killSwitchExemptPath(pathname: string) {
+  return pathAtOrBelow(pathname, "/api/admin")
+    || pathAtOrBelow(pathname, "/api/auth")
+    || pathAtOrBelow(pathname, "/api/health")
+    || pathAtOrBelow(pathname, "/api/traffic");
+}
+
+function isApiPath(pathname: string) {
+  return pathname === "/api" || pathname.startsWith("/api/");
+}
+
+function pathAtOrBelow(pathname: string, root: string) {
+  return pathname === root || pathname.startsWith(`${root}/`);
+}
+
+async function requestsAdminRealtimeTicket(request: Request) {
+  const contentLength = Number(request.headers.get("Content-Length") ?? "0");
+  if (Number.isFinite(contentLength) && contentLength > 4_096) return false;
+  try {
+    const body = await request.clone().json() as { role?: unknown };
+    return body.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
+function featureDisabledResponse(block: ActiveFeatureBlock) {
+  const now = Math.floor(Date.now() / 1000);
+  const retryAfter = block.expiresAt == null ? 300 : Math.max(1, block.expiresAt - now);
+  return Response.json({
+    error: "현재 운영 점검으로 이 기능의 변경 작업이 일시 중지되었습니다.",
+    code: "FEATURE_TEMPORARILY_DISABLED",
+    featureKey: block.featureKey,
+    retryAt: block.expiresAt,
+  }, {
+    status: 503,
+    headers: {
+      "Cache-Control": "no-store",
+      "Retry-After": String(retryAfter),
+    },
+  });
+}
+
+function operationsGuardUnavailableResponse() {
+  return Response.json({
+    error: "운영 안전 상태를 확인하지 못해 변경 요청을 잠시 처리할 수 없습니다.",
+    code: "OPERATIONS_GUARD_UNAVAILABLE",
+    featureKey: null,
+    retryAt: null,
+  }, {
+    status: 503,
+    headers: {
+      "Cache-Control": "no-store",
+      "Retry-After": "60",
+    },
+  });
+}
 
 function shouldRunDirectoryMaintenance() {
   const now = Date.now();

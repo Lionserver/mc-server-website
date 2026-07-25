@@ -174,6 +174,16 @@ export async function ensurePremiumAuctionSchema(db: D1Database) {
     .bind(legacyEndsAt, legacyEndsAt, now, now, legacyEndsAt, legacyEndsAt).run();
 }
 
+export async function hasActiveFinancialLock(db: D1Database, serverId: string) {
+  return Boolean(await db.prepare(`SELECT 1 locked FROM premium_bids
+      WHERE server_id = ? AND status IN ('active', 'winner_pending')
+    UNION ALL SELECT 1 FROM premium_awards
+      WHERE server_id = ? AND status IN ('payment_pending', 'scheduled', 'active')
+    UNION ALL SELECT 1 FROM premium_placements
+      WHERE server_id = ? AND status IN ('scheduled', 'active')
+    LIMIT 1`).bind(serverId, serverId, serverId).first());
+}
+
 export async function synchronizePremiumAuctions(db: D1Database) {
   await ensurePremiumAuctionSchema(db);
   const now = unixNow();
@@ -313,9 +323,9 @@ export async function placePremiumBid(db: D1Database, request: Request, ownerEma
     throw Response.json({ error: "현재 입찰 가능한 경매가 아닙니다." }, { status: 409 });
   }
   if (amount < auction.minimum_bid || amount > 2_000_000_000) throw Response.json({ error: `입찰 금액은 ${auction.minimum_bid.toLocaleString("ko-KR")}원 이상이어야 합니다.` }, { status: 400 });
-  const identity = await db.prepare("SELECT identity_verification_status FROM user_accounts WHERE email = ?")
-    .bind(ownerEmail).first<{ identity_verification_status: string }>();
-  if (identity?.identity_verification_status !== "verified") {
+  const identity = await db.prepare("SELECT account_status, identity_verification_status FROM user_accounts WHERE email = ?")
+    .bind(ownerEmail).first<{ account_status: string; identity_verification_status: string }>();
+  if (identity?.account_status !== "active" || identity.identity_verification_status !== "verified") {
     throw Response.json({ error: "운영자 본인인증을 완료한 계정만 프리미엄 경매에 참여할 수 있습니다." }, { status: 403 });
   }
   const server = await db.prepare(`SELECT d.id, d.title, d.status, d.owner_email, d.owner_verification_status, b.verified_at
@@ -333,38 +343,169 @@ export async function placePremiumBid(db: D1Database, request: Request, ownerEma
   }
   const id = ownerBid?.id ?? crypto.randomUUID().replaceAll("-", "");
   if (ownerBid) {
-    const raised = await db.prepare(`UPDATE premium_bids SET amount = ?, status = 'active', verified_at = ?, updated_at = ?
-      WHERE id = ? AND auction_id = ? AND owner_email = ? AND amount = ? AND ? >= amount + ?`)
-      .bind(amount, server.verified_at, now, id, auctionId, ownerEmail, ownerBid.amount, amount, auction.minimum_increment).run();
-    if (raised.meta.changes !== 1) throw Response.json({ error: "다른 입찰 요청이 먼저 반영되었습니다. 최신 입찰가를 확인해 다시 인상해 주세요." }, { status: 409 });
+    const results = await db.batch([
+      db.prepare(`UPDATE premium_bids SET amount = ?, status = 'active',
+        verified_at = (
+          SELECT bridge.verified_at FROM directory_servers server
+          JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+          WHERE server.id = premium_bids.server_id LIMIT 1
+        ), updated_at = ?
+        WHERE id = ? AND auction_id = ? AND server_id = ? AND owner_email = ?
+          AND status = 'active' AND amount = ?
+          AND EXISTS (
+            SELECT 1 FROM premium_auctions auction
+            JOIN directory_servers server ON server.id = premium_bids.server_id
+            JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+            JOIN user_accounts account ON account.email = premium_bids.owner_email
+            WHERE auction.id = premium_bids.auction_id
+              AND auction.status = 'open'
+              AND auction.bidding_opens_at <= ? AND auction.bidding_closes_at > ?
+              AND ? >= auction.minimum_bid
+              AND ? >= premium_bids.amount + auction.minimum_increment
+              AND server.owner_email = premium_bids.owner_email
+              AND server.deleted_at IS NULL AND server.status = 'active'
+              AND server.owner_verification_status = 'verified'
+              AND bridge.verified_at IS NOT NULL
+              AND account.account_status = 'active'
+              AND account.identity_verification_status = 'verified'
+          )`)
+        .bind(amount, now, id, auctionId, serverId, ownerEmail, ownerBid.amount, now, now, amount, amount),
+      prepareAuditWrite(db, ownerEmail, "premium.bid.raised", "premium_bid", id, {
+        auctionId,
+        serverId,
+        serverTitle: server.title,
+        previousAmount: ownerBid.amount,
+        amount,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      await throwPremiumBidMutationRejected(db, auctionId, serverId, ownerEmail, now);
+    }
   } else {
     try {
-      await db.prepare(`INSERT INTO premium_bids
-        (id, auction_id, server_id, owner_email, amount, status, verified_at, placed_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`)
-        .bind(id, auctionId, serverId, ownerEmail, amount, server.verified_at, now, now).run();
+      const results = await db.batch([
+        db.prepare(`INSERT INTO premium_bids
+          (id, auction_id, server_id, owner_email, amount, status, verified_at, placed_at, updated_at)
+          SELECT ?, auction.id, server.id, ?, ?, 'active', bridge.verified_at, ?, ?
+          FROM premium_auctions auction
+          JOIN directory_servers server ON server.id = ?
+          JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+          JOIN user_accounts account ON account.email = ?
+          WHERE auction.id = ? AND auction.status = 'open'
+            AND auction.bidding_opens_at <= ? AND auction.bidding_closes_at > ?
+            AND ? >= auction.minimum_bid
+            AND server.owner_email = ? AND server.deleted_at IS NULL AND server.status = 'active'
+            AND server.owner_verification_status = 'verified'
+            AND bridge.verified_at IS NOT NULL
+            AND account.account_status = 'active'
+            AND account.identity_verification_status = 'verified'
+            AND NOT EXISTS (
+              SELECT 1 FROM premium_bids existing
+              WHERE existing.auction_id = auction.id
+                AND (existing.server_id = server.id OR existing.owner_email = ?)
+            )`)
+          .bind(id, ownerEmail, amount, now, now, serverId, ownerEmail, auctionId,
+            now, now, amount, ownerEmail, ownerEmail),
+        prepareAuditWrite(db, ownerEmail, "premium.bid.placed", "premium_bid", id, {
+          auctionId,
+          serverId,
+          serverTitle: server.title,
+          previousAmount: null,
+          amount,
+        }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+      ]);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        await throwPremiumBidMutationRejected(db, auctionId, serverId, ownerEmail, now);
+      }
     } catch (error) {
-      if (/UNIQUE constraint failed/i.test(error instanceof Error ? error.message : "")) {
+      if (isUniqueConstraintError(error)) {
         throw Response.json({ error: "같은 주간 경매에 이미 입찰이 등록되었습니다. 새로고침 후 인상해 주세요." }, { status: 409 });
       }
       throw error;
     }
   }
-  await writeAudit(db, ownerEmail, ownerBid ? "premium.bid.raised" : "premium.bid.placed", "premium_bid", id, {
-    auctionId, serverId, serverTitle: server.title, previousAmount: ownerBid?.amount ?? null, amount,
-  });
   return await ownerAuctionDashboard(db, ownerEmail, serverId);
+}
+
+async function throwPremiumBidMutationRejected(
+  db: D1Database,
+  auctionId: string,
+  serverId: string,
+  ownerEmail: string,
+  attemptedAt: number,
+): Promise<never> {
+  const [auction, account, server, conflictingBid] = await Promise.all([
+    db.prepare(`SELECT status, bidding_opens_at, bidding_closes_at FROM premium_auctions
+      WHERE id = ?`).bind(auctionId)
+      .first<{ status: string; bidding_opens_at: number; bidding_closes_at: number }>(),
+    db.prepare(`SELECT account_status, identity_verification_status FROM user_accounts
+      WHERE email = ?`).bind(ownerEmail)
+      .first<{ account_status: string; identity_verification_status: string }>(),
+    db.prepare(`SELECT d.id FROM directory_servers d
+      JOIN bridge_servers bridge ON bridge.server_id = d.bridge_server_id
+      WHERE d.id = ? AND d.owner_email = ? AND d.deleted_at IS NULL AND d.status = 'active'
+        AND d.owner_verification_status = 'verified' AND bridge.verified_at IS NOT NULL`)
+      .bind(serverId, ownerEmail).first<{ id: string }>(),
+    db.prepare(`SELECT id, server_id FROM premium_bids
+      WHERE auction_id = ? AND (owner_email = ? OR server_id = ?) LIMIT 1`)
+      .bind(auctionId, ownerEmail, serverId).first<{ id: string; server_id: string }>(),
+  ]);
+  if (!auction || auction.status !== "open"
+    || auction.bidding_opens_at > attemptedAt || auction.bidding_closes_at <= attemptedAt) {
+    throw Response.json({ error: "입찰 처리 중 경매가 마감되거나 상태가 변경되었습니다." }, { status: 409 });
+  }
+  if (!account || account.account_status !== "active" || account.identity_verification_status !== "verified") {
+    throw Response.json({ error: "운영자 계정 또는 본인인증 상태가 변경되어 입찰할 수 없습니다." }, { status: 403 });
+  }
+  if (!server) {
+    throw Response.json({ error: "서버의 운영·소유권·브리지 인증 상태가 변경되어 입찰할 수 없습니다." }, { status: 403 });
+  }
+  if (conflictingBid) {
+    throw Response.json({ error: "같은 주간 경매의 입찰이 이미 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+  }
+  throw Response.json({ error: "입찰 규칙 또는 기존 입찰가가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+}
+
+function isUniqueConstraintError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /UNIQUE constraint failed|SQLITE_CONSTRAINT(?:_UNIQUE)?/i.test(message);
 }
 
 async function synchronizePremiumPlacements(db: D1Database, now = unixNow()) {
   await db.batch([
+    db.prepare(`UPDATE premium_placements SET status = 'account_suspended', updated_at = ?
+      WHERE status IN ('scheduled', 'active')
+        AND NOT EXISTS (
+          SELECT 1 FROM user_accounts account
+          WHERE account.email = premium_placements.owner_email
+            AND account.account_status = 'active'
+            AND account.identity_verification_status = 'verified'
+        )`).bind(now),
     db.prepare(`UPDATE premium_placements SET status = 'cancelled_server', updated_at = ?
-      WHERE status IN ('scheduled', 'active') AND server_id IN (
-        SELECT id FROM directory_servers WHERE deleted_at IS NOT NULL OR status <> 'active'
-      )`).bind(now),
+      WHERE status IN ('scheduled', 'active')
+        AND NOT EXISTS (
+          SELECT 1 FROM directory_servers server
+          JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+          WHERE server.id = premium_placements.server_id
+            AND server.owner_email = premium_placements.owner_email
+            AND server.deleted_at IS NULL AND server.status = 'active'
+            AND server.owner_verification_status = 'verified'
+            AND bridge.verified_at IS NOT NULL
+        )`).bind(now),
     db.prepare(`UPDATE premium_placements SET status = 'active', updated_at = ?
       WHERE status = 'scheduled' AND starts_at <= ? AND ends_at > ?
-        AND server_id IN (SELECT id FROM directory_servers WHERE deleted_at IS NULL AND status = 'active')`).bind(now, now, now),
+        AND EXISTS (
+          SELECT 1 FROM directory_servers server
+          JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+          JOIN user_accounts account ON account.email = premium_placements.owner_email
+          WHERE server.id = premium_placements.server_id
+            AND server.owner_email = premium_placements.owner_email
+            AND server.deleted_at IS NULL AND server.status = 'active'
+            AND server.owner_verification_status = 'verified'
+            AND bridge.verified_at IS NOT NULL
+            AND account.account_status = 'active'
+            AND account.identity_verification_status = 'verified'
+        )`).bind(now, now, now),
     db.prepare(`UPDATE premium_placements SET status = 'expired', updated_at = ?
       WHERE status IN ('scheduled', 'active') AND ends_at <= ?`).bind(now, now),
   ]);
@@ -382,13 +523,33 @@ async function synchronizePremiumPlacements(db: D1Database, now = unixNow()) {
       statements.push(db.prepare(`UPDATE directory_servers SET premium_managed = 1, premium_tier = 'premium',
         premium_starts_at = ?, premium_ends_at = ?, premium_note = ?, updated_at = ?
         WHERE id = ? AND deleted_at IS NULL AND (premium_managed <> 1 OR premium_tier <> 'premium'
-          OR premium_starts_at IS NOT ? OR premium_ends_at IS NOT ? OR premium_note <> ?)`)
+          OR premium_starts_at IS NOT ? OR premium_ends_at IS NOT ? OR premium_note <> ?)
+          AND EXISTS (
+            SELECT 1 FROM user_accounts account
+            WHERE account.email = directory_servers.owner_email
+              AND account.account_status = 'active'
+              AND account.identity_verification_status = 'verified'
+          )
+          AND EXISTS (
+            SELECT 1 FROM premium_placements current
+            WHERE current.id = ? AND current.status IN ('active', 'scheduled')
+          )`)
         .bind(placement.starts_at, placement.ends_at, placement.note, now, serverId,
-          placement.starts_at, placement.ends_at, placement.note));
+          placement.starts_at, placement.ends_at, placement.note, placement.id));
     } else {
-      statements.push(db.prepare(`UPDATE directory_servers SET premium_managed = 1, premium_tier = 'none',
+      statements.push(db.prepare(`UPDATE directory_servers SET premium_managed = CASE WHEN EXISTS (
+          SELECT 1 FROM user_accounts account
+          WHERE account.email = directory_servers.owner_email
+            AND account.account_status = 'active'
+            AND account.identity_verification_status = 'verified'
+        ) THEN 1 ELSE 0 END, premium_tier = 'none',
         premium_starts_at = NULL, premium_ends_at = NULL, premium_note = '', updated_at = ?
-        WHERE id = ? AND deleted_at IS NULL AND (premium_tier <> 'none' OR premium_starts_at IS NOT NULL
+        WHERE id = ? AND deleted_at IS NULL AND (premium_managed <> CASE WHEN EXISTS (
+            SELECT 1 FROM user_accounts account
+            WHERE account.email = directory_servers.owner_email
+              AND account.account_status = 'active'
+              AND account.identity_verification_status = 'verified'
+          ) THEN 1 ELSE 0 END OR premium_tier <> 'none' OR premium_starts_at IS NOT NULL
           OR premium_ends_at IS NOT NULL OR premium_note <> '')`).bind(now, serverId));
     }
   }
@@ -427,21 +588,28 @@ export async function fillCurrentPremiumVacancy(db: D1Database, serverId: string
     db.prepare(`INSERT INTO premium_placements
       (id, origin_key, auction_id, award_id, server_id, server_title, owner_email, source, amount, status,
         starts_at, ends_at, note, created_by, created_at, updated_at)
-      SELECT ?, ?, ?, NULL, ?, ?, ?, 'manual_fill', 0, 'active', ?, ?, ?, ?, ?, ?
-      WHERE (SELECT COUNT(DISTINCT server_id) FROM premium_placements
+      SELECT ?, ?, ?, NULL, server.id, server.title, server.owner_email, 'manual_fill', 0, 'active',
+        ?, ?, ?, ?, ?, ?
+      FROM directory_servers server
+      JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+      JOIN user_accounts account ON account.email = server.owner_email
+      WHERE server.id = ? AND server.deleted_at IS NULL AND server.status = 'active'
+        AND server.owner_verification_status = 'verified' AND bridge.verified_at IS NOT NULL
+        AND account.account_status = 'active' AND account.identity_verification_status = 'verified'
+        AND (SELECT COUNT(DISTINCT server_id) FROM premium_placements
         WHERE status = 'active' AND starts_at <= ? AND ends_at > ?) < ?
-        AND NOT EXISTS (SELECT 1 FROM premium_placements WHERE server_id = ?
+        AND NOT EXISTS (SELECT 1 FROM premium_placements WHERE server_id = server.id
           AND status IN ('active', 'scheduled') AND starts_at < ? AND ends_at > ?)`)
-      .bind(id, `manual:${id}`, window.auctionId, server.id, server.title, server.owner_email,
+      .bind(id, `manual:${id}`, window.auctionId,
         now, window.endsAt, note || "총관리자 빈 슬롯 수동 배치", adminEmail, now, now,
-        now, now, window.capacity, serverId, window.endsAt, now),
+        serverId, now, now, window.capacity, window.endsAt, now),
     prepareAuditWrite(db, adminEmail, "premium.placement.manual_filled", "premium_placement", id, details, {
       createdAt: now,
       onlyIfPreviousStatementChanged: true,
     }),
   ]);
   if ((results[0].meta.changes ?? 0) !== 1) {
-    throw Response.json({ error: "광고 슬롯이 이미 찼거나 선택한 서버가 배치되어 있습니다. 새로고침 후 다시 확인해 주세요." }, { status: 409 });
+    throw Response.json({ error: "서버·운영자 자격이 변경되었거나 광고 슬롯이 이미 찼습니다. 새로고침 후 다시 확인해 주세요." }, { status: 409 });
   }
   await synchronizePremiumPlacements(db, now);
   return id;
@@ -549,23 +717,39 @@ export async function finalizePremiumAuction(db: D1Database, auctionId: string, 
     JOIN user_accounts account ON account.email = b.owner_email
     WHERE b.auction_id = ? AND b.status = 'active' AND d.status = 'active' AND d.deleted_at IS NULL
       AND d.owner_email = b.owner_email AND d.owner_verification_status = 'verified'
-      AND bridge.verified_at IS NOT NULL AND account.identity_verification_status = 'verified'
+      AND bridge.verified_at IS NOT NULL AND account.account_status = 'active'
+      AND account.identity_verification_status = 'verified'
     ORDER BY b.amount DESC, b.updated_at ASC`).bind(auctionId).all<BidRow>();
   const winners = eligible.results.slice(0, auction.slot_count);
-  const statements: D1PreparedStatement[] = [
-    db.prepare("UPDATE premium_bids SET status = 'loser', updated_at = ? WHERE auction_id = ? AND status = 'active'")
-      .bind(now, auctionId),
-  ];
+  const statements: D1PreparedStatement[] = [];
   for (const bid of winners) {
+    const awardId = crypto.randomUUID().replaceAll("-", "");
     statements.push(
-      db.prepare("UPDATE premium_bids SET status = 'winner_pending', updated_at = ? WHERE id = ?").bind(now, bid.id),
-      db.prepare(`INSERT OR IGNORE INTO premium_awards
+      db.prepare(`UPDATE premium_bids SET status = 'winner_pending', updated_at = ?
+        WHERE id = ? AND auction_id = ? AND status = 'active'
+          AND EXISTS (
+            SELECT 1 FROM directory_servers server
+            JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+            JOIN user_accounts account ON account.email = premium_bids.owner_email
+            WHERE server.id = premium_bids.server_id
+              AND server.owner_email = premium_bids.owner_email
+              AND server.deleted_at IS NULL AND server.status = 'active'
+              AND server.owner_verification_status = 'verified'
+              AND bridge.verified_at IS NOT NULL
+              AND account.account_status = 'active'
+              AND account.identity_verification_status = 'verified'
+          )`).bind(now, bid.id, auctionId),
+      db.prepare(`INSERT INTO premium_awards
         (id, auction_id, bid_id, server_id, owner_email, amount, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'payment_pending', ?, ?)`)
-        .bind(crypto.randomUUID().replaceAll("-", ""), auctionId, bid.id, bid.server_id, bid.owner_email, bid.amount, now, now),
+        SELECT ?, auction_id, id, server_id, owner_email, amount, 'payment_pending', ?, ?
+        FROM premium_bids WHERE id = ? AND auction_id = ? AND status = 'winner_pending'
+          AND changes() = 1`)
+        .bind(awardId, now, now, bid.id, auctionId),
     );
   }
   statements.push(
+    db.prepare("UPDATE premium_bids SET status = 'loser', updated_at = ? WHERE auction_id = ? AND status = 'active'")
+      .bind(now, auctionId),
     db.prepare(`UPDATE premium_auctions SET status = 'closed', finalized_at = ?, updated_at = ?
       WHERE id = ? AND status = 'closing' AND updated_at = ?`).bind(now, now, auctionId, now),
     prepareAuditWrite(db, actorEmail, force ? "premium.auction.finalized_early" : "premium.auction.finalized",
@@ -592,14 +776,29 @@ export async function confirmPremiumAward(db: D1Database, auctionId: string, awa
     JOIN user_accounts account ON account.email = d.owner_email
     WHERE d.id = ? AND d.owner_email = ? AND d.status = 'active' AND d.deleted_at IS NULL
       AND d.owner_verification_status = 'verified' AND bridge.verified_at IS NOT NULL
-      AND account.identity_verification_status = 'verified' LIMIT 1`).bind(award.server_id, award.owner_email).first<{ title: string }>();
+      AND account.account_status = 'active' AND account.identity_verification_status = 'verified' LIMIT 1`)
+    .bind(award.server_id, award.owner_email).first<{ title: string }>();
   if (!eligible) throw Response.json({ error: "낙찰 서버의 소유권·본인인증 상태가 변경되어 결제를 확정할 수 없습니다." }, { status: 409 });
   const status = now >= auction.target_starts_at && now < auction.target_ends_at ? "active" : "scheduled";
   const placementId = crypto.randomUUID().replaceAll("-", "");
   const results = await db.batch([
     db.prepare(`UPDATE premium_awards SET status = ?, payment_confirmed_at = ?, payment_reference = ?, confirmed_by = ?, updated_at = ?
-      WHERE id = ? AND auction_id = ? AND status = 'payment_pending'`)
-      .bind(status, now, paymentReference, adminEmail, now, awardId, auctionId),
+      WHERE id = ? AND auction_id = ? AND status = 'payment_pending'
+        AND EXISTS (
+          SELECT 1 FROM directory_servers server
+          JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+          JOIN user_accounts account ON account.email = premium_awards.owner_email
+          JOIN premium_auctions auction ON auction.id = premium_awards.auction_id
+          WHERE server.id = premium_awards.server_id
+            AND server.owner_email = premium_awards.owner_email
+            AND server.deleted_at IS NULL AND server.status = 'active'
+            AND server.owner_verification_status = 'verified'
+            AND bridge.verified_at IS NOT NULL
+            AND account.account_status = 'active'
+            AND account.identity_verification_status = 'verified'
+            AND auction.target_ends_at > ?
+        )`)
+      .bind(status, now, paymentReference, adminEmail, now, awardId, auctionId, now),
     prepareAuditWrite(db, adminEmail, "premium.award.payment_confirmed", "premium_award", awardId, {
       auctionId,
       serverId: award.server_id,
@@ -634,10 +833,23 @@ export async function forfeitPremiumAward(db: D1Database, auctionId: string, awa
   if (!award) throw Response.json({ error: "낙찰 정보를 찾을 수 없습니다." }, { status: 404 });
   if (award.status !== "payment_pending") throw Response.json({ error: "결제 대기 중인 낙찰만 포기 처리할 수 있습니다." }, { status: 409 });
   const now = unixNow();
+  const replacement = await db.prepare(`SELECT b.* FROM premium_bids b
+    JOIN directory_servers d ON d.id = b.server_id JOIN bridge_servers bridge ON bridge.server_id = d.bridge_server_id
+    JOIN user_accounts account ON account.email = b.owner_email
+    WHERE b.auction_id = ? AND b.status = 'loser' AND d.status = 'active' AND d.deleted_at IS NULL
+      AND d.owner_email = b.owner_email AND d.owner_verification_status = 'verified'
+      AND bridge.verified_at IS NOT NULL AND account.account_status = 'active'
+      AND account.identity_verification_status = 'verified'
+    ORDER BY b.amount DESC, b.updated_at ASC LIMIT 1`).bind(auctionId).first<BidRow>();
   const forfeited = await db.batch([
     db.prepare(`UPDATE premium_awards SET status = 'forfeited', updated_at = ?, confirmed_by = ?
       WHERE id = ? AND auction_id = ? AND status = 'payment_pending'`)
       .bind(now, adminEmail, awardId, auctionId),
+    prepareAuditWrite(db, adminEmail, "premium.award.forfeited", "premium_award", awardId, {
+      auctionId,
+      serverId: award.server_id,
+      replacementCandidateServerId: replacement?.server_id ?? null,
+    }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
     db.prepare(`UPDATE premium_bids SET status = 'forfeited', updated_at = ?
       WHERE id = ? AND status = 'winner_pending'
         AND EXISTS (SELECT 1 FROM premium_awards WHERE id = ? AND status = 'forfeited'
@@ -647,33 +859,58 @@ export async function forfeitPremiumAward(db: D1Database, auctionId: string, awa
   if ((forfeited[0].meta.changes ?? 0) !== 1) {
     throw Response.json({ error: "다른 요청에서 이미 낙찰 상태가 변경되었습니다." }, { status: 409 });
   }
-  const replacement = await db.prepare(`SELECT b.* FROM premium_bids b
-    JOIN directory_servers d ON d.id = b.server_id JOIN bridge_servers bridge ON bridge.server_id = d.bridge_server_id
-    JOIN user_accounts account ON account.email = b.owner_email
-    WHERE b.auction_id = ? AND b.status = 'loser' AND d.status = 'active' AND d.deleted_at IS NULL
-      AND d.owner_email = b.owner_email AND d.owner_verification_status = 'verified'
-      AND bridge.verified_at IS NOT NULL AND account.identity_verification_status = 'verified'
-    ORDER BY b.amount DESC, b.updated_at ASC LIMIT 1`).bind(auctionId).first<BidRow>();
   let replacementAwardId: string | null = null;
   if (replacement) {
     const candidateAwardId = crypto.randomUUID().replaceAll("-", "");
-    const promoted = await db.batch([
-      db.prepare(`UPDATE premium_bids SET status = 'winner_pending', updated_at = ?
-        WHERE id = ? AND auction_id = ? AND status = 'loser'`)
-        .bind(now, replacement.id, auctionId),
-      db.prepare(`INSERT INTO premium_awards
-        (id, auction_id, bid_id, server_id, owner_email, amount, status, created_at, updated_at)
-        SELECT ?, ?, ?, ?, ?, ?, 'payment_pending', ?, ?
-        WHERE changes() = 1`)
-        .bind(candidateAwardId, auctionId, replacement.id, replacement.server_id, replacement.owner_email, replacement.amount, now, now),
-    ]);
-    if ((promoted[0].meta.changes ?? 0) === 1 && (promoted[1].meta.changes ?? 0) === 1) {
-      replacementAwardId = candidateAwardId;
+    try {
+      const promoted = await db.batch([
+        db.prepare(`UPDATE premium_bids SET status = 'winner_pending', updated_at = ?
+          WHERE id = ? AND auction_id = ? AND status = 'loser'
+            AND EXISTS (
+              SELECT 1 FROM directory_servers server
+              JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+              JOIN user_accounts account ON account.email = premium_bids.owner_email
+              WHERE server.id = premium_bids.server_id
+                AND server.owner_email = premium_bids.owner_email
+                AND server.deleted_at IS NULL AND server.status = 'active'
+                AND server.owner_verification_status = 'verified'
+                AND bridge.verified_at IS NOT NULL
+                AND account.account_status = 'active'
+                AND account.identity_verification_status = 'verified'
+            )`)
+          .bind(now, replacement.id, auctionId),
+        db.prepare(`INSERT INTO premium_awards
+          (id, auction_id, bid_id, server_id, owner_email, amount, status, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ?, ?, 'payment_pending', ?, ?
+          WHERE changes() = 1
+            AND EXISTS (
+              SELECT 1 FROM premium_bids promoted
+              JOIN directory_servers server ON server.id = promoted.server_id
+              JOIN bridge_servers bridge ON bridge.server_id = server.bridge_server_id
+              JOIN user_accounts account ON account.email = promoted.owner_email
+              WHERE promoted.id = ? AND promoted.auction_id = ? AND promoted.status = 'winner_pending'
+                AND server.owner_email = promoted.owner_email
+                AND server.deleted_at IS NULL AND server.status = 'active'
+                AND server.owner_verification_status = 'verified'
+                AND bridge.verified_at IS NOT NULL
+                AND account.account_status = 'active'
+                AND account.identity_verification_status = 'verified'
+            )`)
+          .bind(candidateAwardId, auctionId, replacement.id, replacement.server_id, replacement.owner_email,
+            replacement.amount, now, now, replacement.id, auctionId),
+        prepareAuditWrite(db, adminEmail, "premium.award.replacement_promoted", "premium_award", candidateAwardId, {
+          auctionId,
+          forfeitedAwardId: awardId,
+          replacementServerId: replacement.server_id,
+        }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+      ]);
+      if ((promoted[0].meta.changes ?? 0) === 1 && (promoted[1].meta.changes ?? 0) === 1) {
+        replacementAwardId = candidateAwardId;
+      }
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
     }
   }
-  await writeAudit(db, adminEmail, "premium.award.forfeited", "premium_award", awardId, {
-    auctionId, serverId: award.server_id, replacementAwardId, replacementServerId: replacement?.server_id ?? null,
-  });
   return replacementAwardId;
 }
 

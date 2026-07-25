@@ -355,6 +355,20 @@ try {
   const afterDelete = await fetch(`${baseUrl}/api/servers/${id}`, { headers: { "X-MKR-Local-Owner": "minecraft-kr-local-preview" } });
   assert.equal(afterDelete.status, 404);
 
+  const quarantinedAsset = new FormData();
+  quarantinedAsset.append("icon", gifFixture(420, 280));
+  const quarantinedAssetUpload = await fetch(`${baseUrl}/api/servers/${id}/assets`, {
+    method: "POST", headers: ownerUploadHeaders, body: quarantinedAsset,
+  });
+  assert.equal(quarantinedAssetUpload.status, 404);
+
+  const quarantinedPoster = new FormData();
+  quarantinedPoster.append("poster", pngFixture(1200, 1600));
+  const quarantinedPosterUpload = await fetch(`${baseUrl}/api/servers/${id}/description-assets`, {
+    method: "POST", headers: ownerUploadHeaders, body: quarantinedPoster,
+  });
+  assert.equal(quarantinedPosterUpload.status, 404);
+
   const raceTitle = `Race ${suffix}`;
   const racePayload = { ...payload, title: raceTitle, address: `race-${suffix}.minecraft.kr` };
   const raceResponses = await Promise.all(Array.from({ length: 8 }, () => fetch(`${baseUrl}/api/servers`, {

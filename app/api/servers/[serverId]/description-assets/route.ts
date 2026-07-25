@@ -62,9 +62,22 @@ export async function POST(request: Request, context: RouteContext) {
       customMetadata: { ownerEmail, serverId, assetId: id, purpose: "server-description-poster" },
     });
     try {
-      await environment.DB.prepare(`INSERT INTO server_description_assets
-        (id, server_id, object_key, content_type, width, height, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(id, serverId, objectKey, poster.file.type, poster.width, poster.height, poster.file.size, now).run();
+      const inserted = await environment.DB.prepare(`INSERT INTO server_description_assets
+        (id, server_id, object_key, content_type, width, height, size, created_at)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM directory_servers guarded_server
+          WHERE guarded_server.id = ? AND guarded_server.owner_email = ?
+            AND guarded_server.deleted_at IS NULL
+            AND guarded_server.owner_verification_status <> 'disputed'
+        )
+        AND (SELECT COUNT(*) FROM server_description_assets WHERE server_id = ?) < 12`)
+        .bind(id, serverId, objectKey, poster.file.type, poster.width, poster.height, poster.file.size, now,
+          serverId, ownerEmail, serverId).run();
+      if ((inserted.meta.changes ?? 0) !== 1) {
+        await environment.MEDIA.delete(objectKey).catch(() => undefined);
+        return Response.json({ error: "서버 상태 또는 포스터 보관 한도가 변경되었습니다. 새로고침 후 다시 업로드해 주세요." }, { status: 409 });
+      }
     } catch (error) {
       await environment.MEDIA.delete(objectKey).catch(() => undefined);
       throw error;

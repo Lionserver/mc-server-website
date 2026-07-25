@@ -1,10 +1,19 @@
-import { adminErrorResponse, requireAdmin, writeAudit } from "@/lib/admin-security";
+import {
+  adminErrorResponse,
+  prepareAuditWrite,
+  requireAdmin,
+  synchronizeBlacklist,
+  synchronizeServerEnforcements,
+} from "@/lib/admin-security";
+import { broadcastDirectoryUpdate } from "@/lib/directory-realtime";
 import { ensureOwnershipSchema } from "@/lib/server-ownership";
-import { ensurePremiumAuctionSchema } from "@/lib/premium-auction";
+import { ensurePremiumAuctionSchema, hasActiveFinancialLock } from "@/lib/premium-auction";
+import { disconnectChatPrincipal } from "@/lib/chat-realtime-control";
 
 type RouteContext = { params: Promise<{ serverId: string }> | { serverId: string } };
 type ServerRow = {
-  id: string; title: string; status: string; bridge_server_id: string | null; deleted_at: number | null;
+  id: string; owner_email: string; title: string; status: string; bridge_server_id: string | null; deleted_at: number | null;
+  address: string; port: number; resolved_ips: string; status_before_deletion: string | null; purge_after: number | null; purged_at: number | null;
   votes_override: number | null; uptime_basis_points: number | null; premium_managed: number;
   votes_adjustment: number; uptime_adjustment_basis_points: number;
   premium_tier: string; premium_starts_at: number | null; premium_ends_at: number | null; premium_note: string;
@@ -19,15 +28,76 @@ async function serverIdFrom(context: RouteContext) {
 export async function PATCH(request: Request, context: RouteContext) {
   try {
     const id = await serverIdFrom(context);
-    const { environment, session } = await requireAdmin(request, { mutating: true });
+    const body = await request.json() as Record<string, unknown>;
+    const action = typeof body.action === "string" ? body.action : "";
+    const { environment, session } = await requireAdmin(request, {
+      mutating: true,
+      stepUp: true,
+    });
     await ensureOwnershipSchema(environment.DB);
     await ensurePremiumAuctionSchema(environment.DB);
-    const body = await request.json() as Record<string, unknown>;
+    if (action === "restore") {
+      const quarantined = await environment.DB.prepare("SELECT * FROM directory_servers WHERE id = ? AND deleted_at IS NOT NULL")
+        .bind(id).first<ServerRow>();
+      if (!quarantined) return Response.json({ error: "격리된 서버를 찾을 수 없습니다." }, { status: 404 });
+      const now = Math.floor(Date.now() / 1000);
+      if (quarantined.purged_at != null || quarantined.purge_after == null || quarantined.purge_after <= now) {
+        return Response.json({ error: "복구 가능한 7일 격리 기간이 지났습니다." }, { status: 410 });
+      }
+      const duplicate = await environment.DB.prepare(`SELECT id FROM directory_servers
+        WHERE lower(address) = lower(?) AND port = ? AND id <> ? AND deleted_at IS NULL LIMIT 1`)
+        .bind(quarantined.address, quarantined.port, id).first<{ id: string }>();
+      if (duplicate) {
+        return Response.json({ error: "같은 주소와 포트를 사용하는 활성 서버가 있어 복구할 수 없습니다." }, { status: 409 });
+      }
+      const blacklist = await environment.DB.prepare(`SELECT id, reason FROM server_blacklist
+        WHERE status = 'active' AND (expires_at IS NULL OR expires_at > ?)
+          AND ((kind = 'address' AND value = lower(?))
+            OR (kind = 'ip' AND instr(lower(?), '"' || lower(value) || '"') > 0))
+        LIMIT 1`).bind(now, quarantined.address, quarantined.resolved_ips).first<{ id: string; reason: string }>();
+      if (blacklist) {
+        return Response.json({
+          error: "현재 활성 블랙리스트와 일치해 복구할 수 없습니다. 먼저 차단 항목을 검토해 주세요.",
+          blacklistId: blacklist.id,
+        }, { status: 409 });
+      }
+      const restoredStatus = restorableStatus(quarantined.status_before_deletion);
+      const results = await environment.DB.batch([
+        environment.DB.prepare(`UPDATE directory_servers SET deleted_at = NULL, status = ?,
+          status_before_deletion = NULL, deletion_reason = '', deleted_by = NULL,
+          purge_after = NULL, purged_at = NULL, updated_at = ?
+          WHERE id = ? AND deleted_at IS NOT NULL AND purged_at IS NULL AND purge_after > ?
+            AND NOT EXISTS (
+              SELECT 1 FROM directory_servers live
+              WHERE live.id <> ? AND lower(live.address) = lower(directory_servers.address)
+                AND live.port = directory_servers.port AND live.deleted_at IS NULL
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM server_blacklist bl
+              WHERE bl.status = 'active' AND (bl.expires_at IS NULL OR bl.expires_at > ?)
+                AND ((bl.kind = 'address' AND bl.value = lower(directory_servers.address))
+                  OR (bl.kind = 'ip' AND instr(lower(directory_servers.resolved_ips), '"' || lower(bl.value) || '"') > 0))
+            )`).bind(restoredStatus, now, id, now, id, now),
+        prepareAuditWrite(environment.DB, session.email, "server.restored", "server", id, {
+          title: quarantined.title,
+          status: restoredStatus,
+          quarantinedAt: quarantined.deleted_at,
+        }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+      ]);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        return Response.json({ error: "서버 격리 상태가 변경되었거나 주소가 중복되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+      }
+      await synchronizeBlacklist(environment.DB);
+      await synchronizeServerEnforcements(environment.DB);
+      await broadcastDirectoryUpdate(environment, id, now).catch(() => false);
+      return Response.json({ status: restoredStatus, restoredAt: now }, {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
     const existing = await environment.DB.prepare("SELECT * FROM directory_servers WHERE id = ? AND deleted_at IS NULL")
       .bind(id).first<ServerRow>();
     if (!existing) return Response.json({ error: "서버를 찾을 수 없습니다." }, { status: 404 });
 
-    const action = typeof body.action === "string" ? body.action : "";
     if (action === "adjust_metrics" || action === "reset_metric_adjustments") {
       const now = Math.floor(Date.now() / 1000);
       const [voteCount, uptimeHistory, liveStatus] = await Promise.all([
@@ -54,15 +124,20 @@ export async function PATCH(request: Request, context: RouteContext) {
       if (nextUptimeBasisPoints < 0 || nextUptimeBasisPoints > 10_000) throw Response.json({ error: "조정 후 업타임은 0-100% 범위여야 합니다." }, { status: 400 });
       const votesAdjustment = nextVotes - baseVotes;
       const uptimeAdjustmentBasisPoints = nextUptimeBasisPoints - baseUptimeBasisPoints;
-      await environment.DB.prepare(`UPDATE directory_servers SET votes_override = NULL, votes_adjustment = ?,
-        uptime_basis_points = NULL, uptime_adjustment_basis_points = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`)
-        .bind(votesAdjustment, uptimeAdjustmentBasisPoints, now, id).run();
-      await writeAudit(environment.DB, session.email, action === "reset_metric_adjustments" ? "server.metrics.reset" : "server.metrics.adjusted", "server", id, {
-        title: existing.title,
-        before: { effectiveVotes: currentVotes, effectiveUptime: currentUptimeBasisPoints / 100 },
-        delta: { votes: action === "reset_metric_adjustments" ? null : voteDelta, uptime: action === "reset_metric_adjustments" ? null : uptimeDeltaBasisPoints / 100 },
-        after: { effectiveVotes: nextVotes, effectiveUptime: nextUptimeBasisPoints / 100, votesAdjustment, uptimeAdjustment: uptimeAdjustmentBasisPoints / 100 },
-      });
+      const results = await environment.DB.batch([
+        environment.DB.prepare(`UPDATE directory_servers SET votes_override = NULL, votes_adjustment = ?,
+          uptime_basis_points = NULL, uptime_adjustment_basis_points = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`)
+          .bind(votesAdjustment, uptimeAdjustmentBasisPoints, now, id),
+        prepareAuditWrite(environment.DB, session.email, action === "reset_metric_adjustments" ? "server.metrics.reset" : "server.metrics.adjusted", "server", id, {
+          title: existing.title,
+          before: { effectiveVotes: currentVotes, effectiveUptime: currentUptimeBasisPoints / 100 },
+          delta: { votes: action === "reset_metric_adjustments" ? null : voteDelta, uptime: action === "reset_metric_adjustments" ? null : uptimeDeltaBasisPoints / 100 },
+          after: { effectiveVotes: nextVotes, effectiveUptime: nextUptimeBasisPoints / 100, votesAdjustment, uptimeAdjustment: uptimeAdjustmentBasisPoints / 100 },
+        }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+      ]);
+      if ((results[0]?.meta.changes ?? 0) !== 1) {
+        return Response.json({ error: "서버 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+      }
       return Response.json({ metrics: { baseVotes, votes: nextVotes, votesAdjustment, baseUptime: baseUptimeBasisPoints / 100, uptime: nextUptimeBasisPoints / 100, uptimeAdjustment: uptimeAdjustmentBasisPoints / 100 } });
     }
 
@@ -80,16 +155,21 @@ export async function PATCH(request: Request, context: RouteContext) {
     const now = Math.floor(Date.now() / 1000);
     const uptimeBasisPoints = uptime == null ? null : Math.round(uptime * 100);
 
-    await environment.DB.prepare(`UPDATE directory_servers SET votes_override = ?, uptime_basis_points = ?,
-      premium_managed = ?, premium_tier = ?, premium_starts_at = ?, premium_ends_at = ?, premium_note = ?, updated_at = ?
-      WHERE id = ? AND deleted_at IS NULL`)
-      .bind(votes, uptimeBasisPoints, premiumChanged ? 1 : existing.premium_managed, premiumTier,
-        premiumStartsAt, premiumEndsAt, premiumNote, now, id).run();
-    await writeAudit(environment.DB, session.email, "server.controls.updated", "server", id, {
-      title: existing.title,
-      before: { votesOverride: existing.votes_override, uptimeBasisPoints: existing.uptime_basis_points, premiumTier: existing.premium_tier },
-      after: { votesOverride: votes, uptimeBasisPoints, premiumTier, premiumStartsAt, premiumEndsAt },
-    });
+    const results = await environment.DB.batch([
+      environment.DB.prepare(`UPDATE directory_servers SET votes_override = ?, uptime_basis_points = ?,
+        premium_managed = ?, premium_tier = ?, premium_starts_at = ?, premium_ends_at = ?, premium_note = ?, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL`)
+        .bind(votes, uptimeBasisPoints, premiumChanged ? 1 : existing.premium_managed, premiumTier,
+          premiumStartsAt, premiumEndsAt, premiumNote, now, id),
+      prepareAuditWrite(environment.DB, session.email, "server.controls.updated", "server", id, {
+        title: existing.title,
+        before: { votesOverride: existing.votes_override, uptimeBasisPoints: existing.uptime_basis_points, premiumTier: existing.premium_tier },
+        after: { votesOverride: votes, uptimeBasisPoints, premiumTier, premiumStartsAt, premiumEndsAt },
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "서버 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+    }
     return Response.json({ ok: true });
   } catch (error) {
     return adminErrorResponse(error);
@@ -99,7 +179,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 export async function DELETE(request: Request, context: RouteContext) {
   try {
     const id = await serverIdFrom(context);
-    const { environment, session } = await requireAdmin(request, { mutating: true });
+    const { environment, session } = await requireAdmin(request, { mutating: true, stepUp: true });
     await ensureOwnershipSchema(environment.DB);
     await ensurePremiumAuctionSchema(environment.DB);
     const body = await request.json().catch(() => ({})) as { confirmation?: unknown; reason?: unknown };
@@ -107,41 +187,56 @@ export async function DELETE(request: Request, context: RouteContext) {
       .bind(id).first<ServerRow>();
     if (!existing) return Response.json({ error: "서버를 찾을 수 없습니다." }, { status: 404 });
     if (body.confirmation !== existing.title) return Response.json({ error: "삭제하려면 서버 이름을 정확히 입력해 주세요." }, { status: 400 });
-    const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "총관리자 삭제";
-    const assets = await environment.DB.prepare(`SELECT object_key FROM server_assets WHERE server_id = ?
-      UNION ALL SELECT object_key FROM server_description_assets WHERE server_id = ?`).bind(id, id).all<{ object_key: string }>();
-    const now = Math.floor(Date.now() / 1000);
-    const statements = [
-      environment.DB.prepare("DELETE FROM server_assets WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_description_assets WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_staff_profiles WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_votes WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM admin_messages WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM operator_channel_messages WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM admin_conversations WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM chat_realtime_tickets WHERE server_id = ?").bind(id),
-      environment.DB.prepare(`UPDATE server_enforcements SET status = 'cancelled_server', resolved_by = ?, resolved_at = ?,
-        resolution_note = '서버 삭제로 자동 종료', updated_at = ? WHERE server_id = ? AND status = 'active'`).bind(session.email, now, now, id),
-      environment.DB.prepare("DELETE FROM server_ownership_transfers WHERE server_id = ?").bind(id),
-      environment.DB.prepare("DELETE FROM server_ownership_claims WHERE server_id = ?").bind(id),
-      environment.DB.prepare("UPDATE premium_bids SET status = 'cancelled_server', updated_at = ? WHERE server_id = ? AND status = 'active'").bind(now, id),
-      environment.DB.prepare("UPDATE premium_awards SET status = 'cancelled_server', updated_at = ?, confirmed_by = ? WHERE server_id = ? AND status IN ('payment_pending', 'scheduled', 'active')").bind(now, session.email, id),
-      environment.DB.prepare("UPDATE premium_placements SET status = 'cancelled_server', updated_at = ? WHERE server_id = ? AND status IN ('scheduled', 'active')").bind(now, id),
-      environment.DB.prepare("UPDATE directory_servers SET deleted_at = ?, status = 'deleted', bridge_server_id = NULL, updated_at = ? WHERE id = ?")
-        .bind(now, now, id),
-    ];
-    if (existing.bridge_server_id) {
-      statements.unshift(
-        environment.DB.prepare("DELETE FROM bridge_backends WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_nonces WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_telemetry_history WHERE server_id = ?").bind(existing.bridge_server_id),
-        environment.DB.prepare("DELETE FROM bridge_servers WHERE server_id = ?").bind(existing.bridge_server_id),
-      );
+    if (await hasActiveFinancialLock(environment.DB, id)) {
+      return Response.json({ error: "진행 중인 입찰·낙찰·프리미엄 광고가 있어 서버를 격리할 수 없습니다." }, { status: 409 });
     }
-    await environment.DB.batch(statements);
-    if (environment.MEDIA) await Promise.all(assets.results.map((asset) => environment.MEDIA?.delete(asset.object_key).catch(() => undefined)));
-    await writeAudit(environment.DB, session.email, "server.deleted", "server", id, { title: existing.title, reason });
-    return new Response(null, { status: 204 });
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 500)
+      : "총관리자 7일 격리";
+    const now = Math.floor(Date.now() / 1000);
+    const purgeAfter = now + 7 * 86_400;
+    const results = await environment.DB.batch([
+      environment.DB.prepare(`UPDATE directory_servers SET deleted_at = ?, status_before_deletion = status,
+        status = 'deleted', deletion_reason = ?, deleted_by = ?, purge_after = ?, purged_at = NULL, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_bids WHERE server_id = directory_servers.id
+              AND status IN ('active', 'winner_pending')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_awards WHERE server_id = directory_servers.id
+              AND status IN ('payment_pending', 'scheduled', 'active')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM premium_placements WHERE server_id = directory_servers.id
+              AND status IN ('scheduled', 'active')
+          )`)
+        .bind(now, reason, session.email, purgeAfter, now, id),
+      prepareAuditWrite(environment.DB, session.email, "server.deleted", "server", id, {
+        title: existing.title,
+        reason,
+        quarantine: true,
+        purgeAfter,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+      environment.DB.prepare(`DELETE FROM chat_realtime_tickets WHERE server_id = ?
+        AND EXISTS (
+          SELECT 1 FROM directory_servers
+          WHERE id = ? AND deleted_at = ? AND deleted_by = ? AND purge_after = ?
+        )`).bind(id, id, now, session.email, purgeAfter),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "서버 격리 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+    }
+    await disconnectChatPrincipal(environment, {
+      role: "owner",
+      principalEmail: existing.owner_email,
+      serverIds: [id],
+    }).catch(() => 0);
+    await broadcastDirectoryUpdate(environment, id, now).catch(() => false);
+    return new Response(null, {
+      status: 204,
+      headers: { "Cache-Control": "no-store", "X-MKR-Purge-After": String(purgeAfter) },
+    });
   } catch (error) {
     return adminErrorResponse(error);
   }
@@ -149,6 +244,12 @@ export async function DELETE(request: Request, context: RouteContext) {
 
 function own(value: object, key: string) {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function restorableStatus(value: string | null) {
+  return value && new Set(["draft", "active", "blacklisted", "suspended", "blinded"]).has(value)
+    ? value
+    : "draft";
 }
 
 function nullableInteger(value: unknown, minimum: number, maximum: number, label: string) {

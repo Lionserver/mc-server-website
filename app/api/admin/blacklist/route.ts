@@ -1,8 +1,8 @@
-import { adminErrorResponse, normalizeBlacklistValue, requireAdmin, writeAudit, type BlacklistKind } from "@/lib/admin-security";
+import { adminErrorResponse, normalizeBlacklistValue, prepareAuditWrite, requireAdmin, type BlacklistKind } from "@/lib/admin-security";
 
 export async function POST(request: Request) {
   try {
-    const { environment, session } = await requireAdmin(request, { mutating: true });
+    const { environment, session } = await requireAdmin(request, { mutating: true, stepUp: true });
     const body = await request.json() as Record<string, unknown>;
     const kind = body.kind === "ip" || body.kind === "address" ? body.kind : null;
     if (!kind) throw Response.json({ error: "차단 기준은 IP 또는 서버 주소여야 합니다." }, { status: 400 });
@@ -19,19 +19,24 @@ export async function POST(request: Request) {
     const matchSql = kind === "address"
       ? "lower(address) = ?"
       : "instr(lower(resolved_ips), '\"' || ? || '\"') > 0";
-    const [, affected] = await environment.DB.batch([
+    const affectedEstimate = await environment.DB.prepare(`SELECT COUNT(*) count FROM directory_servers
+      WHERE ${matchSql} AND deleted_at IS NULL`).bind(value).first<{ count: number }>();
+    const results = await environment.DB.batch([
       environment.DB.prepare(`INSERT INTO server_blacklist
         (id, kind, value, reason, status, expires_at, created_by, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`)
         .bind(id, kind, value, reason, expiresAt, session.email, now, now),
+      prepareAuditWrite(environment.DB, session.email, "blacklist.created", "blacklist", id, {
+        kind, value, reason, expiresAt, affectedServers: Number(affectedEstimate?.count ?? 0),
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
       environment.DB.prepare(`UPDATE directory_servers SET
         status_before_blacklist = CASE WHEN status = 'blacklisted' THEN status_before_blacklist ELSE status END,
         status = 'blacklisted', updated_at = ?
         WHERE ${matchSql} AND deleted_at IS NULL`).bind(now, value),
     ]);
-    await writeAudit(environment.DB, session.email, "blacklist.created", "blacklist", id, {
-      kind, value, reason, expiresAt, affectedServers: affected.meta.changes ?? 0,
-    });
+    if ((results[0]?.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "차단 항목을 생성하지 못했습니다." }, { status: 409 });
+    }
     return Response.json({ entry: { id, kind, value, reason, status: "active", expiresAt, createdBy: session.email, createdAt: now } }, { status: 201 });
   } catch (error) {
     return adminErrorResponse(error);

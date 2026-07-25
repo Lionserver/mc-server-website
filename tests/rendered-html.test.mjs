@@ -345,7 +345,7 @@ test("retires the temporary administrator header bypass fail-closed", async () =
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
     readFile(new URL("../.dev.vars.example", import.meta.url), "utf8"),
   ]);
-  assert.match(security, /if \(options\?\.mutating\) assertSameOrigin\(request\)/);
+  assert.match(security, /if \(options\?\.mutating \|\| options\?\.stepUp\) assertSameOrigin\(request\)/);
   assert.doesNotMatch(security, /temporaryAdminSession/);
   assert.doesNotMatch(security, /temporary: true/);
   assert.match(sessionRoute, /authMode: session\.authMode/);
@@ -679,13 +679,14 @@ test("ships passwordless owner auth and audited ownership transfer flows", async
 });
 
 test("ships responsive, accessible, realtime and exact-spec product assets", async () => {
-  const [page, trendChart, timedMotion, operator, registration, adminPage, adminSecurity, chatRealtime, chatHook, chatRoom, directoryRoom, directoryRealtime, publicDirectory, premiumAuction, votesApi, worker, css, layout, packageJson, schema, directoryApi, assetApi, assetServe, serverDirectory, serverUpdate, imageAssets, imageCrop, motionCropMigration, og] = await Promise.all([
+  const [page, trendChart, timedMotion, operator, registration, adminPage, adminTools, adminSecurity, chatRealtime, chatHook, chatRoom, directoryRoom, directoryRealtime, publicDirectory, premiumAuction, votesApi, worker, css, layout, packageJson, schema, directoryApi, assetApi, assetServe, serverDirectory, serverUpdate, imageAssets, imageCrop, motionCropMigration, og] = await Promise.all([
     readHomeSource(),
     readFile(new URL("../components/player-trend-chart.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/use-timed-motion.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/operator/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../components/server-registration-dialog.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/admin-tool-controls.tsx", import.meta.url), "utf8"),
     readFile(new URL("../lib/admin-security.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/chat-realtime.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/use-chat-realtime.ts", import.meta.url), "utf8"),
@@ -813,7 +814,7 @@ test("ships responsive, accessible, realtime and exact-spec product assets", asy
   assert.match(operator, /toggleAddressCharacter/);
   assert.match(adminPage, /OTP 6자리/);
   assert.match(adminPage, /블랙리스트 서버 관리/);
-  assert.match(adminPage, /관리자 감사 로그/);
+  assert.match(adminTools, /관리자 감사 로그/);
   assert.match(adminPage, /낙찰·결제 확인/);
   assert.match(adminPage, /현재 순위로 조기 마감/);
   assert.match(adminPage, /결제 확인번호 기록/);
@@ -1239,7 +1240,7 @@ test("automatically removes ended broadcast caches without touching durable serv
   assert.doesNotMatch(cache, /server-assets|server-description-assets/);
   assert.match(preview, /broadcastPreviewObjectKey/);
   assert.match(preview, /broadcastProfileObjectKey/);
-  assert.match(route, /requireAdmin\(request, \{ mutating: true \}\)/);
+  assert.match(route, /requireAdmin\(request, \{ mutating: true, stepUp: true \}\)/);
   assert.match(route, /broadcast\.cache\.cleaned/);
   assert.match(worker, /cleanupBroadcastImageCache\(env\.MEDIA\)/);
   assert.match(vite, /crons: \["\*\/5 \* \* \* \*"\]/);
@@ -1373,4 +1374,119 @@ test("publishes crawlable metadata routes and indexable server detail documents"
   assert.match(publicDirectory, /serializePublicRow\(row, now, false\)/);
   assert.match(publicDirectory, /includeDescription \? row\.description : ""/);
   assert.match(worker, /X-Robots-Tag", "noindex, nofollow"/);
+});
+
+test("protects destructive administrator work with recent authentication and reversible quarantine", async () => {
+  const [security, sessionsApi, stepUpApi, userAuth, accountsApi, serverAdminApi, ownerServerApi, quarantine, operations, worker, schema] = await Promise.all([
+    readFile(new URL("../lib/admin-security.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/sessions/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/sessions/step-up/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/user-auth.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/accounts/[accountId]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/servers/[serverId]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/servers/[serverId]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/server-quarantine.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/admin-operations.ts", import.meta.url), "utf8"),
+    readFile(new URL("../worker/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(security, /STEP_UP_SECONDS = 5 \* 60/);
+  assert.match(security, /code: "step_up_required"/);
+  assert.match(security, /admin\.step_up\.succeeded/);
+  assert.match(security, /admin\.sessions\.revoked_others/);
+  assert.match(security, /source_ip_masked/);
+  assert.match(security, /user_agent_label/);
+  assert.match(sessionsApi, /listAdminSessions/);
+  assert.match(sessionsApi, /revokeAdminSessions/);
+  assert.match(stepUpApi, /stepUpAdmin/);
+
+  assert.match(userAuth, /a\.account_status = 'active'/);
+  assert.match(userAuth, /account_status = 'suspended'/);
+  assert.match(userAuth, /WHERE id = \? AND email = \? AND account_status = 'active'/);
+  assert.match(accountsApi, /stepUp: true/);
+  assert.match(accountsApi, /DELETE FROM user_sessions/);
+  assert.match(accountsApi, /DELETE FROM user_login_codes/);
+  assert.match(accountsApi, /DELETE FROM chat_realtime_tickets/);
+  assert.match(worker, /a\.account_status = 'active'/);
+
+  assert.match(serverAdminApi, /status_before_deletion = status/);
+  assert.match(serverAdminApi, /purgeAfter = now \+ 7 \* 86_400/);
+  assert.match(serverAdminApi, /action === "restore"/);
+  assert.match(serverAdminApi, /server\.restored/);
+  assert.doesNotMatch(serverAdminApi, /DELETE FROM server_assets/);
+  assert.doesNotMatch(serverAdminApi, /DELETE FROM server_votes/);
+  assert.doesNotMatch(serverAdminApi, /DELETE FROM bridge_servers/);
+  assert.match(serverAdminApi, /NOT EXISTS \(\s*SELECT 1 FROM premium_bids/);
+  assert.match(serverAdminApi, /NOT EXISTS \(\s*SELECT 1 FROM server_blacklist/);
+  assert.match(ownerServerApi, /status_before_deletion = status/);
+  assert.doesNotMatch(ownerServerApi, /status IN \('active', 'winner_pending', 'winner'\)/);
+  assert.match(quarantine, /purgeExpiredServerQuarantines/);
+  assert.match(quarantine, /DELETE FROM server_assets/);
+  assert.match(quarantine, /purged_at = \?/);
+  assert.match(quarantine, /server\.quarantine\.purged/);
+  assert.match(operations, /server_quarantine_purge/);
+  assert.match(worker, /runTrackedAdminJob\(env\.DB, "server_quarantine_purge"/);
+  assert.match(schema, /elevatedUntil: integer\("elevated_until"\)/);
+  assert.match(schema, /accountStatus: text\("account_status"\)/);
+  assert.match(schema, /statusBeforeDeletion: text\("status_before_deletion"\)/);
+});
+
+test("keeps identity verification references out of administrator browser payloads", async () => {
+  const [accountsApi, overviewApi, controls, adminPage] = await Promise.all([
+    readFile(new URL("../app/api/admin/accounts/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/admin/overview/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/admin-tool-controls.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(accountsApi, /END identity_reference_masked/);
+  assert.match(accountsApi, /identityReferenceMasked: row\.identity_reference_masked/);
+  assert.doesNotMatch(accountsApi, /identityReference: row\.identity_reference/);
+  assert.doesNotMatch(accountsApi, /instr\(lower\(a\.identity_reference\)/);
+  assert.match(overviewApi, /END identity_reference_masked/);
+  assert.doesNotMatch(overviewApi, /identity_provider, identity_reference,/);
+  assert.match(controls, /identityReferenceMasked: string/);
+  assert.match(controls, /account\.identityReferenceMasked \|\| "확인번호 없음"/);
+  assert.match(controls, /window\.prompt\("인증 결과 확인번호를 입력하세요\.", ""\)/);
+  assert.doesNotMatch(controls, /account\.identityReference\b/);
+  assert.match(adminPage, /identity_reference_masked: string/);
+  assert.doesNotMatch(adminPage, /identity_reference: string/);
+});
+
+test("guards owner writes and media uploads against quarantine and financial races", async () => {
+  const [serverRoute, assetRoute, descriptionAssetRoute, descriptionAssetItemRoute] = await Promise.all([
+    readFile(new URL("../app/api/servers/[serverId]/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/servers/[serverId]/assets/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/servers/[serverId]/description-assets/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/servers/[serverId]/description-assets/[assetId]/route.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(serverRoute, /AND updated_at = \?/);
+  assert.match(serverRoute, /SELECT 1 FROM premium_bids WHERE server_id = directory_servers\.id/);
+  assert.match(serverRoute, /SELECT 1 FROM premium_awards WHERE server_id = directory_servers\.id/);
+  assert.match(serverRoute, /SELECT 1 FROM premium_placements WHERE server_id = directory_servers\.id/);
+  assert.match(serverRoute, /WHERE changes\(\) = 1/);
+  assert.match(serverRoute, /mutation_guard\.id = \?/);
+  assert.match(serverRoute, /const results = await environment\.DB\.batch\(statements\);[\s\S]*results\[0\]\?\.meta\.changes[\s\S]*results\[1\]\?\.meta\.changes/);
+  assert.ok(
+    serverRoute.indexOf("results[0]?.meta.changes") < serverRoute.indexOf("environment.MEDIA?.delete(asset.object_key)"),
+    "unused R2 objects must only be deleted after the guarded server update succeeds",
+  );
+  assert.match(serverRoute, /DELETE FROM chat_realtime_tickets[\s\S]*quarantined_server\.deleted_at = \?/);
+
+  assert.match(assetRoute, /INSERT INTO server_assets[\s\S]*SELECT \?, \?, \?, \?, \?, \?, \?, \?[\s\S]*guarded_server\.owner_email = \?/);
+  assert.match(assetRoute, /guarded_server\.deleted_at IS NULL/);
+  assert.match(assetRoute, /guarded_server\.id = server_assets\.server_id[\s\S]*guarded_server\.owner_email = \?/);
+  assert.match(assetRoute, /results\.some\(\(result\) => \(result\.meta\.changes \?\? 0\) !== 1\)/);
+  assert.match(assetRoute, /results\.some[\s\S]*MEDIA\?\.delete\(objectKey\)[\s\S]*status: 409/);
+
+  assert.match(descriptionAssetRoute, /INSERT INTO server_description_assets[\s\S]*SELECT \?, \?, \?, \?, \?, \?, \?, \?/);
+  assert.match(descriptionAssetRoute, /guarded_server\.owner_email = \?/);
+  assert.match(descriptionAssetRoute, /guarded_server\.deleted_at IS NULL/);
+  assert.match(descriptionAssetRoute, /inserted\.meta\.changes \?\? 0/);
+  assert.match(descriptionAssetRoute, /inserted\.meta\.changes[\s\S]*MEDIA\.delete\(objectKey\)[\s\S]*status: 409/);
+  assert.match(descriptionAssetItemRoute, /guarded_server\.id = server_description_assets\.server_id/);
+  assert.match(descriptionAssetItemRoute, /guarded_server\.deleted_at IS NULL/);
+  assert.match(descriptionAssetItemRoute, /deleted\.meta\.changes \?\? 0/);
 });

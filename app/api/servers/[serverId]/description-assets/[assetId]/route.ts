@@ -53,7 +53,18 @@ export async function DELETE(request: Request, context: RouteContext) {
     const asset = await environment.DB.prepare("SELECT object_key FROM server_description_assets WHERE id = ? AND server_id = ?")
       .bind(assetId, serverId).first<{ object_key: string }>();
     if (!asset) return Response.json({ error: "not found" }, { status: 404 });
-    await environment.DB.prepare("DELETE FROM server_description_assets WHERE id = ? AND server_id = ?").bind(assetId, serverId).run();
+    const deleted = await environment.DB.prepare(`DELETE FROM server_description_assets
+      WHERE id = ? AND server_id = ?
+        AND EXISTS (
+          SELECT 1 FROM directory_servers guarded_server
+          WHERE guarded_server.id = server_description_assets.server_id
+            AND guarded_server.owner_email = ? AND guarded_server.deleted_at IS NULL
+            AND guarded_server.owner_verification_status <> 'disputed'
+            AND instr(guarded_server.description_document, ?) = 0
+        )`).bind(assetId, serverId, ownerEmail, assetId).run();
+    if ((deleted.meta.changes ?? 0) !== 1) {
+      return Response.json({ error: "서버 또는 포스터 상태가 변경되었습니다. 새로고침 후 다시 시도해 주세요." }, { status: 409 });
+    }
     await environment.MEDIA.delete(asset.object_key).catch(() => undefined);
     return new Response(null, { status: 204 });
   } catch (error) {

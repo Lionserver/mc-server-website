@@ -11,6 +11,29 @@ export class ChatRoom {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/disconnect") {
+      if (request.headers.get("X-MKR-Realtime-Internal") !== "disconnect") return new Response("forbidden", { status: 403 });
+      const body = await request.json() as { role?: unknown; principalEmail?: unknown; serverIds?: unknown };
+      if ((body.role !== "admin" && body.role !== "owner") || typeof body.principalEmail !== "string") {
+        return new Response("invalid disconnect target", { status: 400 });
+      }
+      const serverIds = Array.isArray(body.serverIds)
+        ? new Set(body.serverIds.filter((value): value is string => typeof value === "string"))
+        : new Set<string>();
+      let disconnected = 0;
+      for (const socket of this.ctx.getWebSockets()) {
+        const attachment = socket.deserializeAttachment() as ConnectionAttachment | null;
+        const serverMatches = serverIds.size === 0 || Boolean(attachment?.serverId && serverIds.has(attachment.serverId));
+        if (attachment?.role === body.role && attachment.principalEmail === body.principalEmail && serverMatches) {
+          try {
+            socket.close(4003, "authorization revoked");
+            disconnected += 1;
+          } catch { /* already closed */ }
+        }
+      }
+      await this.scheduleExpiry();
+      return Response.json({ disconnected });
+    }
     if (request.method === "POST" && url.pathname === "/broadcast") {
       if (request.headers.get("X-MKR-Realtime-Internal") !== "broadcast") return new Response("forbidden", { status: 403 });
       const event = await request.json() as { type?: unknown; serverId?: unknown };

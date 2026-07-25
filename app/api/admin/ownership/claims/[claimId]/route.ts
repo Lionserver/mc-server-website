@@ -6,7 +6,7 @@ type Context = { params: Promise<{ claimId: string }> | { claimId: string } };
 export async function PATCH(request: Request, context: Context) {
   try {
     const { claimId } = await context.params;
-    const { session } = await requireAdmin(request, { mutating: true });
+    const { session } = await requireAdmin(request, { mutating: true, stepUp: true });
     return Response.json(await reviewOwnershipClaim(request, session.email, claimId, await request.json()));
   } catch (error) {
     return adminErrorResponse(error);

@@ -39,6 +39,11 @@ export const directoryServers = sqliteTable(
     resolvedIps: text("resolved_ips").notNull().default("[]"),
     statusBeforeBlacklist: text("status_before_blacklist"),
     statusBeforeEnforcement: text("status_before_enforcement"),
+    statusBeforeDeletion: text("status_before_deletion"),
+    deletionReason: text("deletion_reason").notNull().default(""),
+    deletedBy: text("deleted_by"),
+    purgeAfter: integer("purge_after"),
+    purgedAt: integer("purged_at"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
     deletedAt: integer("deleted_at"),
@@ -63,8 +68,15 @@ export const userAccounts = sqliteTable(
     identityVerifiedAt: integer("identity_verified_at"),
     identityProvider: text("identity_provider").notNull().default(""),
     identityReference: text("identity_reference").notNull().default(""),
+    accountStatus: text("account_status").notNull().default("active"),
+    suspendedAt: integer("suspended_at"),
+    suspendedBy: text("suspended_by"),
+    suspensionReason: text("suspension_reason").notNull().default(""),
   },
-  (table) => [uniqueIndex("user_accounts_email_idx").on(table.email)],
+  (table) => [
+    uniqueIndex("user_accounts_email_idx").on(table.email),
+    index("user_accounts_status_idx").on(table.accountStatus, table.updatedAt),
+  ],
 );
 
 export const userLoginCodes = sqliteTable(
@@ -378,8 +390,15 @@ export const adminSessions = sqliteTable(
     createdAt: integer("created_at").notNull(),
     expiresAt: integer("expires_at").notNull(),
     lastSeenAt: integer("last_seen_at").notNull(),
+    sessionId: text("session_id"),
+    elevatedUntil: integer("elevated_until").notNull().default(0),
+    sourceIpMasked: text("source_ip_masked").notNull().default(""),
+    userAgentLabel: text("user_agent_label").notNull().default(""),
   },
-  (table) => [index("admin_sessions_expiry_idx").on(table.expiresAt)],
+  (table) => [
+    index("admin_sessions_expiry_idx").on(table.expiresAt),
+    uniqueIndex("admin_sessions_session_id_idx").on(table.sessionId),
+  ],
 );
 
 export const adminLoginAttempts = sqliteTable("admin_login_attempts", {
@@ -400,8 +419,44 @@ export const adminAuditLogs = sqliteTable(
     details: text("details").notNull().default("{}"),
     createdAt: integer("created_at").notNull(),
   },
-  (table) => [index("admin_audit_created_idx").on(table.createdAt)],
+  (table) => [
+    index("admin_audit_created_idx").on(table.createdAt, table.id),
+    index("admin_audit_actor_idx").on(table.adminEmail, table.createdAt),
+    index("admin_audit_action_idx").on(table.action, table.createdAt),
+    index("admin_audit_target_idx").on(table.targetType, table.targetId, table.createdAt),
+  ],
 );
+
+export const adminFeatureControls = sqliteTable("admin_feature_controls", {
+  featureKey: text("feature_key").primaryKey(),
+  mode: text("mode").notNull().default("enabled"),
+  reason: text("reason").notNull().default(""),
+  expiresAt: integer("expires_at"),
+  updatedBy: text("updated_by").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const adminJobStatuses = sqliteTable("admin_job_statuses", {
+  jobKey: text("job_key").primaryKey(),
+  lastStartedAt: integer("last_started_at"),
+  lastSucceededAt: integer("last_succeeded_at"),
+  lastFailedAt: integer("last_failed_at"),
+  lastDurationMs: integer("last_duration_ms"),
+  lastError: text("last_error").notNull().default(""),
+  lastResult: text("last_result").notNull().default("{}"),
+  runCount: integer("run_count").notNull().default(0),
+  failureCount: integer("failure_count").notNull().default(0),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const adminOperationalChecks = sqliteTable("admin_operational_checks", {
+  checkKey: text("check_key").primaryKey(),
+  status: text("status").notNull().default("unknown"),
+  note: text("note").notNull().default(""),
+  checkedBy: text("checked_by").notNull(),
+  checkedAt: integer("checked_at").notNull(),
+  validUntil: integer("valid_until"),
+});
 
 export const siteAnnouncements = sqliteTable(
   "site_announcements",

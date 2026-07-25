@@ -1,8 +1,8 @@
-import { ensureAdminSchema, writeAudit } from "@/lib/admin-security";
+import { ensureAdminSchema, prepareAuditWrite, writeAudit } from "@/lib/admin-security";
 import { hashHex } from "@/lib/bridge-api";
 import { directoryEnv } from "@/lib/server-directory";
 import { pingMinecraftServer } from "@/lib/minecraft-ping";
-import { ensurePremiumAuctionSchema } from "@/lib/premium-auction";
+import { ensurePremiumAuctionSchema, hasActiveFinancialLock } from "@/lib/premium-auction";
 import { assertSameOrigin, ensureUserAuthSchema, normalizeEmail, sendProductEmail, type UserAuthEnvironment } from "@/lib/user-auth";
 
 export type OwnershipMethod = "motd" | "dns";
@@ -194,7 +194,6 @@ export async function updateOwnershipTransfer(request: Request, ownerEmail: stri
     await completeOwnershipChange(environment.DB, server, transfer.to_email, ownerEmail, {
       kind: "transfer", requestId: transferId, now,
     });
-    await writeAudit(environment.DB, ownerEmail, "ownership.transfer.completed", "server", transfer.server_id, { transferId, fromEmail: transfer.from_email, toEmail: transfer.to_email });
     await notify(environment, transfer.from_email, `${server.title} 서버 소유권 이전 완료`, `${server.title} 서버의 소유권이 ${transfer.to_email} 계정으로 이전되었습니다.`, `ownership-complete/${transferId}`).catch(() => false);
     return { status: "completed", serverId: transfer.server_id };
   }
@@ -273,11 +272,14 @@ export async function updateOwnershipClaim(request: Request, claimantEmail: stri
   const verified = await environment.DB.batch([
     environment.DB.prepare("UPDATE server_ownership_claims SET status = 'pending_review', verified_at = ?, updated_at = ? WHERE id = ? AND status = 'pending_verification'").bind(now, now, claimId),
     environment.DB.prepare("UPDATE directory_servers SET owner_verification_status = 'disputed', updated_at = ? WHERE id = ? AND changes() = 1").bind(now, claim.server_id),
+    prepareAuditWrite(environment.DB, claimantEmail, "ownership.claim.verified", "server", claim.server_id, {
+      claimId,
+      method: claim.method,
+    }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
   ]);
   if (verified[0].meta.changes !== 1 || verified[1].meta.changes !== 1) {
     throw Response.json({ error: "요청 상태가 이미 변경되었습니다. 새로고침해 주세요." }, { status: 409 });
   }
-  await writeAudit(environment.DB, claimantEmail, "ownership.claim.verified", "server", claim.server_id, { claimId, method: claim.method });
   await Promise.all([
     notify(environment, server.owner_email, `${server.title} 서버 소유권 주장 알림`, `${claimantEmail} 계정이 ${server.title} 서버의 기술적 통제권을 인증했습니다. Minecraft.kr 총관리자 심사가 진행됩니다.`, `ownership-claim-owner/${claimId}`).catch(() => false),
     environment.ADMIN_EMAIL ? notify(environment, environment.ADMIN_EMAIL, `${server.title} 소유권 심사 필요`, `${claimantEmail} 계정이 ${claim.method.toUpperCase()} 인증을 완료했습니다. 총관리자 시스템에서 승인 또는 거절해 주세요.`, `ownership-claim-admin/${claimId}`).catch(() => false) : Promise.resolve(false),
@@ -290,9 +292,19 @@ export async function adminOwnershipDashboard(db: D1Database) {
   await expireOwnershipRequests(db);
   const [claims, transfers] = await Promise.all([
     db.prepare(`SELECT c.*, d.title, d.address, d.port, d.owner_email FROM server_ownership_claims c
-      JOIN directory_servers d ON d.id = c.server_id ORDER BY CASE c.status WHEN 'pending_review' THEN 0 WHEN 'pending_verification' THEN 1 ELSE 2 END, c.updated_at DESC LIMIT 200`).all<ClaimRow>(),
+      JOIN directory_servers d ON d.id = c.server_id
+      WHERE d.deleted_at IS NULL AND (
+        c.status IN ('pending_verification', 'pending_review')
+        OR c.id IN (SELECT id FROM server_ownership_claims ORDER BY updated_at DESC LIMIT 200)
+      )
+      ORDER BY CASE c.status WHEN 'pending_review' THEN 0 WHEN 'pending_verification' THEN 1 ELSE 2 END, c.updated_at DESC`).all<ClaimRow>(),
     db.prepare(`SELECT t.*, d.title, d.address, d.port FROM server_ownership_transfers t
-      JOIN directory_servers d ON d.id = t.server_id ORDER BY t.updated_at DESC LIMIT 200`).all<TransferRow>(),
+      JOIN directory_servers d ON d.id = t.server_id
+      WHERE d.deleted_at IS NULL AND (
+        t.status IN ('pending_acceptance', 'pending_verification')
+        OR t.id IN (SELECT id FROM server_ownership_transfers ORDER BY updated_at DESC LIMIT 200)
+      )
+      ORDER BY CASE WHEN t.status IN ('pending_acceptance', 'pending_verification') THEN 0 ELSE 1 END, t.updated_at DESC`).all<TransferRow>(),
   ]);
   return { claims: claims.results.map((claim) => serializeClaim(claim, true)), transfers: transfers.results.map(serializeTransfer) };
 }
@@ -312,11 +324,17 @@ export async function reviewOwnershipClaim(request: Request, adminEmail: string,
   const server = await serverById(environment.DB, claim.server_id);
   const now = unixNow();
   if (action === "reject") {
-    const rejected = await environment.DB.prepare(`UPDATE server_ownership_claims SET status = 'rejected', reviewed_at = ?, reviewed_by = ?, review_note = ?, updated_at = ?
-      WHERE id = ? AND status = 'pending_review'`).bind(now, adminEmail, note, now, claimId).run();
-    if (rejected.meta.changes !== 1) throw Response.json({ error: "요청 상태가 이미 변경되었습니다. 새로고침해 주세요." }, { status: 409 });
+    const rejected = await environment.DB.batch([
+      environment.DB.prepare(`UPDATE server_ownership_claims SET status = 'rejected', reviewed_at = ?, reviewed_by = ?, review_note = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending_review'`).bind(now, adminEmail, note, now, claimId),
+      prepareAuditWrite(environment.DB, adminEmail, "ownership.claim.rejected", "server", claim.server_id, {
+        claimId,
+        claimantEmail: claim.claimant_email,
+        note,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
+    ]);
+    if (rejected[0].meta.changes !== 1) throw Response.json({ error: "요청 상태가 이미 변경되었습니다. 새로고침해 주세요." }, { status: 409 });
     await refreshDisputeStatus(environment.DB, claim.server_id, now);
-    await writeAudit(environment.DB, adminEmail, "ownership.claim.rejected", "server", claim.server_id, { claimId, claimantEmail: claim.claimant_email, note });
     await notify(environment, claim.claimant_email, `${server.title} 서버 주장 심사 결과`, `서버 소유권 주장 요청이 거절되었습니다.${note ? ` 사유: ${note}` : ""}`, `ownership-claim-rejected/${claimId}`).catch(() => false);
     return { status: "rejected" };
   }
@@ -329,7 +347,6 @@ export async function reviewOwnershipClaim(request: Request, adminEmail: string,
       review_note = '다른 소유권 요청이 승인되어 자동 종료', updated_at = ? WHERE server_id = ? AND id <> ?
       AND status IN ('pending_verification', 'pending_review')`).bind(now, adminEmail, now, claim.server_id, claimId),
   ]);
-  await writeAudit(environment.DB, adminEmail, "ownership.claim.approved", "server", claim.server_id, { claimId, fromEmail: server.owner_email, toEmail: claim.claimant_email, note });
   await Promise.all([
     notify(environment, claim.claimant_email, `${server.title} 서버 소유권 승인`, `${server.title} 서버가 ${claim.claimant_email} 계정으로 이전되었습니다. 운영자센터에서 새 브리지 키를 발급해 주세요.`, `ownership-claim-approved/${claimId}`).catch(() => false),
     notify(environment, server.owner_email, `${server.title} 서버 소유권 변경`, `Minecraft.kr 소유권 심사 결과 ${server.title} 서버가 ${claim.claimant_email} 계정으로 이전되었습니다.`, `ownership-claim-owner-changed/${claimId}`).catch(() => false),
@@ -351,7 +368,19 @@ async function completeOwnershipChange(
         WHERE id = ? AND server_id = ? AND claimant_email = ? AND status = 'pending_review')`;
   const ownerUpdate = db.prepare(`UPDATE directory_servers SET owner_email = ?, owner_verification_status = 'verified', owner_verified_at = ?,
       bridge_server_id = NULL, status = 'active', updated_at = ?
-      WHERE id = ? AND owner_email = ? AND deleted_at IS NULL AND ${transitionExists}`)
+      WHERE id = ? AND owner_email = ? AND deleted_at IS NULL AND ${transitionExists}
+        AND NOT EXISTS (
+          SELECT 1 FROM premium_bids
+          WHERE server_id = directory_servers.id AND status IN ('active', 'winner_pending')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM premium_awards
+          WHERE server_id = directory_servers.id AND status IN ('payment_pending', 'scheduled', 'active')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM premium_placements
+          WHERE server_id = directory_servers.id AND status IN ('scheduled', 'active')
+        )`)
     .bind(nextEmail, completion.now, completion.now, server.id, server.owner_email,
       completion.requestId, server.id, nextEmail);
   const transitionUpdate = completion.kind === "transfer"
@@ -367,6 +396,28 @@ async function completeOwnershipChange(
     : `EXISTS (SELECT 1 FROM server_ownership_claims
         WHERE id = ? AND server_id = ? AND claimant_email = ? AND status = 'approved' AND reviewed_at = ?)`;
   const guardValues = [completion.requestId, server.id, nextEmail, completion.now] as const;
+  const auditStatements = [
+    prepareAuditWrite(db, actorEmail, "ownership.credentials.rotated", "server", server.id, {
+      reason: completion.kind,
+      previousOwner: server.owner_email,
+      nextOwner: nextEmail,
+    }, { createdAt: completion.now, onlyIfPreviousStatementChanged: true }),
+    ...(completion.kind === "transfer" ? [
+      prepareAuditWrite(db, actorEmail, "ownership.transfer.completed", "server", server.id, {
+        transferId: completion.requestId,
+        fromEmail: server.owner_email,
+        toEmail: nextEmail,
+      }, { createdAt: completion.now, onlyIfPreviousStatementChanged: true }),
+    ] : []),
+    ...(completion.kind === "claim" ? [
+      prepareAuditWrite(db, actorEmail, "ownership.claim.approved", "server", server.id, {
+        claimId: completion.requestId,
+        fromEmail: server.owner_email,
+        toEmail: nextEmail,
+        note: completion.note,
+      }, { createdAt: completion.now, onlyIfPreviousStatementChanged: true }),
+    ] : []),
+  ];
   const cleanupStatements = [
     db.prepare(`DELETE FROM admin_messages WHERE server_id = ? AND ${completionGuard}`).bind(server.id, ...guardValues),
     db.prepare(`DELETE FROM admin_conversations WHERE server_id = ? AND ${completionGuard}`).bind(server.id, ...guardValues),
@@ -380,20 +431,17 @@ async function completeOwnershipChange(
       db.prepare(`DELETE FROM bridge_servers WHERE server_id = ? AND ${completionGuard}`).bind(server.bridge_server_id, ...guardValues),
     );
   }
-  const completionResults = await db.batch([ownerUpdate, transitionUpdate, ...cleanupStatements]);
+  const completionResults = await db.batch([ownerUpdate, transitionUpdate, ...auditStatements, ...cleanupStatements]);
   if (completionResults[0].meta.changes !== 1 || completionResults[1].meta.changes !== 1) {
     throw Response.json({ error: "소유권 상태가 이미 변경되었습니다. 화면을 새로고침해 다시 확인해 주세요." }, { status: 409 });
   }
-  await writeAudit(db, actorEmail, "ownership.credentials.rotated", "server", server.id, { reason: completion.kind, previousOwner: server.owner_email, nextOwner: nextEmail });
 }
 
 async function assertNoOwnershipFinancialLock(db: D1Database, serverId: string) {
   await ensurePremiumAuctionSchema(db);
-  const locked = await db.prepare(`SELECT 1 locked FROM premium_bids WHERE server_id = ? AND status IN ('active', 'winner_pending', 'winner')
-    UNION ALL SELECT 1 FROM premium_awards WHERE server_id = ? AND status IN ('payment_pending', 'scheduled', 'active')
-    UNION ALL SELECT 1 FROM premium_placements WHERE server_id = ? AND status IN ('scheduled', 'active') LIMIT 1`)
-    .bind(serverId, serverId, serverId).first();
-  if (locked) throw Response.json({ error: "진행 중인 입찰·미결제 낙찰·광고가 있어 소유권을 변경할 수 없습니다. 총관리자에게 먼저 정리를 요청해 주세요." }, { status: 409 });
+  if (await hasActiveFinancialLock(db, serverId)) {
+    throw Response.json({ error: "진행 중인 입찰·미결제 낙찰·광고가 있어 소유권을 변경할 수 없습니다. 총관리자에게 먼저 정리를 요청해 주세요." }, { status: 409 });
+  }
 }
 
 async function expireOwnershipRequests(db: D1Database) {

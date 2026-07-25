@@ -5,6 +5,7 @@ import { parseServerCategories, readStoredServerCategories } from "@/lib/server-
 export interface DirectoryEnv {
   DB: D1Database;
   MEDIA?: R2Bucket;
+  CHAT_ROOMS?: DurableObjectNamespace;
   DIRECTORY_LIVE?: DurableObjectNamespace;
   VOTE_IP_HASH_SECRET?: string;
   SITE_TRAFFIC_HASH_SECRET?: string;
@@ -59,6 +60,11 @@ export interface DirectoryServerRow {
   resolved_ips: string;
   status_before_blacklist: string | null;
   status_before_enforcement: string | null;
+  status_before_deletion: string | null;
+  deletion_reason: string;
+  deleted_by: string | null;
+  purge_after: number | null;
+  purged_at: number | null;
   premium_managed?: number;
   premium_tier?: string;
   premium_starts_at?: number | null;
@@ -105,6 +111,11 @@ export async function ensureDirectorySchema(db: D1Database) {
     resolved_ips TEXT NOT NULL DEFAULT '[]',
     status_before_blacklist TEXT,
     status_before_enforcement TEXT,
+    status_before_deletion TEXT,
+    deletion_reason TEXT NOT NULL DEFAULT '',
+    deleted_by TEXT,
+    purge_after INTEGER,
+    purged_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     deleted_at INTEGER
@@ -163,6 +174,24 @@ export async function ensureDirectorySchema(db: D1Database) {
     ["zoom_percent", "ALTER TABLE server_assets ADD COLUMN zoom_percent INTEGER NOT NULL DEFAULT 100"],
   ];
   for (const [name, statement] of assetAdditions) if (!assetColumnNames.has(name)) await db.prepare(statement).run();
+  const directoryColumns = await db.prepare("PRAGMA table_info(directory_servers)").all<{ name: string }>();
+  const directoryColumnNames = new Set(directoryColumns.results.map((column) => column.name));
+  const directoryAdditions: Array<[string, string]> = [
+    ["status_before_deletion", "ALTER TABLE directory_servers ADD COLUMN status_before_deletion TEXT"],
+    ["deletion_reason", "ALTER TABLE directory_servers ADD COLUMN deletion_reason TEXT NOT NULL DEFAULT ''"],
+    ["deleted_by", "ALTER TABLE directory_servers ADD COLUMN deleted_by TEXT"],
+    ["purge_after", "ALTER TABLE directory_servers ADD COLUMN purge_after INTEGER"],
+    ["purged_at", "ALTER TABLE directory_servers ADD COLUMN purged_at INTEGER"],
+  ];
+  for (const [name, statement] of directoryAdditions) {
+    if (!directoryColumnNames.has(name)) await db.prepare(statement).run();
+  }
+  await db.prepare(`UPDATE directory_servers SET
+    status_before_deletion = CASE WHEN status = 'deleted' THEN 'draft' ELSE status END,
+    deletion_reason = CASE WHEN deletion_reason = '' THEN '기존 삭제 기록 마이그레이션' ELSE deletion_reason END,
+    deleted_by = COALESCE(deleted_by, 'legacy@minecraft.kr'),
+    purge_after = deleted_at + 604800
+    WHERE deleted_at IS NOT NULL AND purge_after IS NULL`).run();
   const staffColumns = await db.prepare("PRAGMA table_info(server_staff_profiles)").all<{ name: string }>();
   if (!staffColumns.results.some((column) => column.name === "minecraft_uuid")) {
     await db.prepare("ALTER TABLE server_staff_profiles ADD COLUMN minecraft_uuid TEXT").run();

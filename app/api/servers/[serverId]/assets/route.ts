@@ -66,7 +66,13 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (server.owner_verification_status === "disputed") return Response.json({ error: "소유권 심사 중에는 이미지를 변경할 수 없습니다." }, { status: 423 });
     const now = Math.floor(Date.now() / 1000);
     const updated = await environment.DB.prepare(`UPDATE server_assets SET focus_x = ?, focus_y = ?, zoom_percent = ?, updated_at = ?
-      WHERE server_id = ? AND kind = ? AND content_type IN ('image/gif', 'video/webm')`).bind(focusX, focusY, zoom, now, serverId, kind).run();
+      WHERE server_id = ? AND kind = ? AND content_type IN ('image/gif', 'video/webm')
+        AND EXISTS (
+          SELECT 1 FROM directory_servers guarded_server
+          WHERE guarded_server.id = server_assets.server_id AND guarded_server.owner_email = ?
+            AND guarded_server.deleted_at IS NULL
+            AND guarded_server.owner_verification_status <> 'disputed'
+        )`).bind(focusX, focusY, zoom, now, serverId, kind, ownerEmail).run();
     if (!updated.meta.changes) return Response.json({ error: "먼저 움직이는 이미지를 등록해 주세요." }, { status: 404 });
     if (server.status === "active") await broadcastDirectoryUpdate(environment, serverId, now).catch(() => false);
     return Response.json({ asset: { kind, focusX, focusY, zoom, updatedAt: now } });
@@ -123,12 +129,23 @@ export async function POST(request: Request, context: RouteContext) {
         nextKeys.set(asset.kind, objectKey);
         await environment.MEDIA.put(objectKey, asset.bytes, { httpMetadata: { contentType: asset.file.type }, customMetadata: { ownerEmail, serverId, kind: asset.kind } });
         statements.push(environment.DB.prepare(`INSERT INTO server_assets
-          (server_id, kind, object_key, content_type, width, height, size, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (server_id, kind, object_key, content_type, width, height, size, updated_at)
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM directory_servers guarded_server
+            WHERE guarded_server.id = ? AND guarded_server.owner_email = ?
+              AND guarded_server.deleted_at IS NULL
+              AND guarded_server.owner_verification_status <> 'disputed'
+          )
           ON CONFLICT(server_id, kind) DO UPDATE SET object_key = excluded.object_key, content_type = excluded.content_type,
           width = excluded.width, height = excluded.height, size = excluded.size, updated_at = excluded.updated_at`)
-          .bind(serverId, asset.kind, objectKey, asset.file.type, asset.width, asset.height, asset.file.size, now));
+          .bind(serverId, asset.kind, objectKey, asset.file.type, asset.width, asset.height, asset.file.size, now, serverId, ownerEmail));
       }
-      await environment.DB.batch(statements);
+      const results = await environment.DB.batch(statements);
+      if (results.some((result) => (result.meta.changes ?? 0) !== 1)) {
+        await Promise.all([...nextKeys.values()].map((objectKey) => environment.MEDIA?.delete(objectKey).catch(() => undefined)));
+        return Response.json({ error: "서버 상태가 변경되었습니다. 새로고침 후 다시 업로드해 주세요." }, { status: 409 });
+      }
     } catch (error) {
       await Promise.all([...nextKeys.values()].map((objectKey) => environment.MEDIA?.delete(objectKey).catch(() => undefined)));
       throw error;

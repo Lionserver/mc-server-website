@@ -1,4 +1,4 @@
-import { adminErrorResponse, cleanMessage, requireAdmin, writeAudit } from "@/lib/admin-security";
+import { adminErrorResponse, cleanMessage, prepareAuditWrite, requireAdmin } from "@/lib/admin-security";
 import { broadcastChatEvent, type ChatRealtimeEnvironment } from "@/lib/chat-realtime";
 
 type RouteContext = { params: Promise<{ serverId: string }> | { serverId: string } };
@@ -47,6 +47,10 @@ export async function POST(request: Request, context: RouteContext) {
         .bind(serverId, now, now, now),
       environment.DB.prepare(`INSERT INTO admin_messages (id, server_id, sender_role, sender_email, body, created_at)
         VALUES (?, ?, 'admin', ?, ?, ?)`).bind(id, serverId, session.email, body, now),
+      prepareAuditWrite(environment.DB, session.email, "conversation.message.sent", "server", serverId, {
+        messageId: id,
+        length: body.length,
+      }, { createdAt: now, onlyIfPreviousStatementChanged: true }),
     ]);
     const message = { id, sender_role: "admin" as const, sender_email: session.email, body, created_at: now };
     const realtime = await broadcastChatEvent(environment as ChatRealtimeEnvironment, {
@@ -54,7 +58,6 @@ export async function POST(request: Request, context: RouteContext) {
       serverId,
       message: { ...message, sender_email: "" },
     }).catch(() => false);
-    await writeAudit(environment.DB, session.email, "conversation.message.sent", "server", serverId, { messageId: id, length: body.length });
     return Response.json({ message, realtime }, { status: 201 });
   } catch (error) {
     return adminErrorResponse(error);

@@ -63,8 +63,13 @@ export async function ensureUserAuthSchema(db: D1Database) {
     ["identity_verified_at", "ALTER TABLE user_accounts ADD COLUMN identity_verified_at INTEGER"],
     ["identity_provider", "ALTER TABLE user_accounts ADD COLUMN identity_provider TEXT NOT NULL DEFAULT ''"],
     ["identity_reference", "ALTER TABLE user_accounts ADD COLUMN identity_reference TEXT NOT NULL DEFAULT ''"],
+    ["account_status", "ALTER TABLE user_accounts ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'"],
+    ["suspended_at", "ALTER TABLE user_accounts ADD COLUMN suspended_at INTEGER"],
+    ["suspended_by", "ALTER TABLE user_accounts ADD COLUMN suspended_by TEXT"],
+    ["suspension_reason", "ALTER TABLE user_accounts ADD COLUMN suspension_reason TEXT NOT NULL DEFAULT ''"],
   ];
   for (const [name, statement] of accountAdditions) if (!accountNames.has(name)) await db.prepare(statement).run();
+  await db.prepare("CREATE INDEX IF NOT EXISTS user_accounts_status_idx ON user_accounts (account_status, updated_at)").run();
   const codeColumns = await db.prepare("PRAGMA table_info(user_login_codes)").all<{ name: string }>();
   if (!codeColumns.results.some((column) => column.name === "request_ip_hash")) {
     await db.prepare("ALTER TABLE user_login_codes ADD COLUMN request_ip_hash TEXT NOT NULL DEFAULT ''").run();
@@ -83,6 +88,9 @@ export async function requestEmailCode(request: Request, payload: unknown) {
   const environment = await userAuthEnv();
   await ensureUserAuthSchema(environment.DB);
   const now = unixNow();
+  if (await isSuspendedAccount(environment.DB, email)) {
+    throw Response.json({ error: "정지된 운영자 계정입니다. 관리자에게 문의해 주세요.", code: "account_suspended" }, { status: 423 });
+  }
   const fingerprint = await requestFingerprint(environment, request, email);
   const ipHash = await requestIpHash(environment, request);
   await assertEmailCodeRequestAllowed(environment.DB, request, email);
@@ -134,7 +142,13 @@ export async function verifyEmailCode(request: Request, payload: unknown) {
     throw Response.json({ error: "인증 코드가 올바르지 않습니다." }, { status: 401 });
   }
 
-  const existing = await environment.DB.prepare("SELECT id FROM user_accounts WHERE email = ?").bind(email).first<{ id: string }>();
+  const existing = await environment.DB.prepare("SELECT id, account_status FROM user_accounts WHERE email = ?")
+    .bind(email).first<{ id: string; account_status: string }>();
+  if (existing?.account_status === "suspended") {
+    await environment.DB.prepare("UPDATE user_login_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL")
+      .bind(now, row.id).run();
+    throw Response.json({ error: "정지된 운영자 계정입니다. 관리자에게 문의해 주세요.", code: "account_suspended" }, { status: 423 });
+  }
   const accountId = existing?.id ?? crypto.randomUUID().replaceAll("-", "");
   const sessionToken = randomToken(32);
   const tokenHash = await sha256Hex(sessionToken);
@@ -142,17 +156,23 @@ export async function verifyEmailCode(request: Request, payload: unknown) {
     WHERE id = ? AND consumed_at IS NULL AND attempts < ? AND expires_at > ?`)
     .bind(now, row.id, MAX_CODE_ATTEMPTS, now).run();
   if (consumed.meta.changes !== 1) throw Response.json({ error: "인증 코드가 이미 사용되었습니다. 새 코드를 요청해 주세요." }, { status: 409 });
-  await environment.DB.batch([
+  const results = await environment.DB.batch([
     environment.DB.prepare(`INSERT INTO user_accounts
       (id, email, email_verified_at, last_login_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(email) DO UPDATE SET email_verified_at = excluded.email_verified_at,
-      last_login_at = excluded.last_login_at, updated_at = excluded.updated_at`)
+      last_login_at = excluded.last_login_at, updated_at = excluded.updated_at
+      WHERE user_accounts.account_status = 'active'`)
       .bind(accountId, email, now, now, now, now),
     environment.DB.prepare("UPDATE user_login_codes SET consumed_at = ? WHERE email = ? AND consumed_at IS NULL").bind(now, email),
     environment.DB.prepare(`INSERT INTO user_sessions
-      (token_hash, account_id, email, expires_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .bind(tokenHash, accountId, email, now + SESSION_SECONDS, now, now),
+      (token_hash, account_id, email, expires_at, created_at, last_seen_at)
+      SELECT ?, id, email, ?, ?, ? FROM user_accounts
+      WHERE id = ? AND email = ? AND account_status = 'active'`)
+      .bind(tokenHash, now + SESSION_SECONDS, now, now, accountId, email),
   ]);
+  if ((results[2]?.meta.changes ?? 0) !== 1) {
+    throw Response.json({ error: "정지된 운영자 계정입니다. 관리자에게 문의해 주세요.", code: "account_suspended" }, { status: 423 });
+  }
   return {
     session: { accountId, email, expiresAt: now + SESSION_SECONDS, authMode: "email" as const },
     cookie: ownerCookie(request, sessionToken, SESSION_SECONDS),
@@ -174,8 +194,9 @@ export async function getOwnerSessionFromDb(db: D1Database, request: Request): P
   if (token && token.length >= 32 && token.length <= 160) {
     await ensureUserAuthSchema(db);
     const tokenHash = await sha256Hex(token);
-    const row = await db.prepare(`SELECT account_id, email, expires_at, last_seen_at FROM user_sessions
-      WHERE token_hash = ? AND expires_at > ?`).bind(tokenHash, now)
+    const row = await db.prepare(`SELECT s.account_id, s.email, s.expires_at, s.last_seen_at
+      FROM user_sessions s JOIN user_accounts a ON a.id = s.account_id
+      WHERE s.token_hash = ? AND s.expires_at > ? AND a.account_status = 'active'`).bind(tokenHash, now)
       .first<{ account_id: string; email: string; expires_at: number; last_seen_at: number }>();
     if (row) {
       if (row.last_seen_at < now - 60) {
@@ -187,7 +208,9 @@ export async function getOwnerSessionFromDb(db: D1Database, request: Request): P
   const platformEmail = trustedPlatformUserEmail(request);
   if (!platformEmail) return null;
   await ensureUserAuthSchema(db);
-  const existing = await db.prepare("SELECT id FROM user_accounts WHERE email = ?").bind(platformEmail).first<{ id: string }>();
+  const existing = await db.prepare("SELECT id, account_status FROM user_accounts WHERE email = ?")
+    .bind(platformEmail).first<{ id: string; account_status: string }>();
+  if (existing?.account_status === "suspended") return null;
   let accountId = existing?.id;
   if (!accountId) {
     const proposedId = crypto.randomUUID().replaceAll("-", "");
@@ -195,7 +218,10 @@ export async function getOwnerSessionFromDb(db: D1Database, request: Request): P
       (id, email, email_verified_at, last_login_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO NOTHING`)
       .bind(proposedId, platformEmail, now, now, now, now).run();
-    accountId = (await db.prepare("SELECT id FROM user_accounts WHERE email = ?").bind(platformEmail).first<{ id: string }>())?.id;
+    const created = await db.prepare("SELECT id, account_status FROM user_accounts WHERE email = ?")
+      .bind(platformEmail).first<{ id: string; account_status: string }>();
+    if (created?.account_status === "suspended") return null;
+    accountId = created?.id;
   }
   if (!accountId) return null;
   return { accountId, email: platformEmail, expiresAt: now + 5 * 60, authMode: "sites" };
@@ -314,6 +340,11 @@ function constantTimeEqual(left: string, right: string) {
   let difference = 0;
   for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
   return difference === 0;
+}
+
+async function isSuspendedAccount(db: D1Database, email: string) {
+  return Boolean(await db.prepare(`SELECT 1 suspended FROM user_accounts
+    WHERE email = ? AND account_status = 'suspended' LIMIT 1`).bind(email).first());
 }
 
 function unixNow() {

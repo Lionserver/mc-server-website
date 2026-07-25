@@ -860,7 +860,7 @@ export default function OperatorPage() {
             </div>
           </section>
 
-          <section className="danger-zone"><div><span>DANGER ZONE</span><h3>서버 삭제</h3><p>삭제된 서버는 목록과 운영자 센터에서 즉시 숨겨집니다.</p></div><label><span>확인을 위해 <b>{selected.title}</b> 입력</span><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} placeholder={selected.title} /></label><button type="button" disabled={saving || deleteConfirmation !== selected.title} onClick={remove}><Trash2 size={15} /> 서버 삭제</button></section>
+          <section className="danger-zone"><div><span>DANGER ZONE</span><h3>서버 삭제</h3><p>즉시 숨김 처리되어 7일 복구함에 보관됩니다. 복구가 필요하면 관리자에게 요청하세요.</p></div><label><span>확인을 위해 <b>{selected.title}</b> 입력</span><input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} placeholder={selected.title} /></label><button type="button" disabled={saving || deleteConfirmation !== selected.title} onClick={remove}><Trash2 size={15} /> 서버 삭제</button></section>
         </>}
       </section>
     </div>
